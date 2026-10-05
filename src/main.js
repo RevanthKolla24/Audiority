@@ -10,14 +10,28 @@ const { loadLibrary, saveLibrary, mutateLibrary, emptyLibrary } = require('./pro
 const fs = require('node:fs/promises');
 const { discoverMedia } = require('./imports');
 const { builtins, tokenNames, loadThemes, saveThemes, mutateThemes, validateTheme } = require('./themes');
-const { preferencesDefaults, validatePreferences, statsDefaults, validateStats, recordJob, loadState, saveState, inspectInOrder } = require('./app-state');
+const { preferencesDefaults, validatePreferences, statsDefaults, validateStats, recordJob, loadState, saveState, inspectInOrder, loadQueue, saveQueue, cleanupInterrupted } = require('./app-state');
 let preferences = preferencesDefaults(), stats = statsDefaults(), preferencesWarning = '', statsWarning = '', appStateBusy = false;
 
 let window, engine, outputDirectory = '', running = false, importing = false, profileBusy = false, controller, settings = null, settingsWarning = '', library = emptyLibrary();
 const items = new Map();
 let importController, appearance, appearanceWarning = '', appearanceBusy = false;
 const page = path.join(__dirname, 'ui', 'index.html');
-function send(type, data) { if (window && !window.isDestroyed()) window.webContents.send('update', { type, ...data }); }
+let queueWrites = Promise.resolve();
+function persistQueue(required = false) {
+  const snapshot = new Map([...items].map(([id, item]) => [id, structuredClone(Object.fromEntries(['id', 'file', 'status', 'output', 'temporaryOutput', 'relativeDirectory', 'sidecars', 'importWarnings', 'error'].map(key => [key, item[key]])))]));
+  const write = queueWrites.then(() => saveQueue(app.getPath('userData'), snapshot));
+  queueWrites = write.catch(error => send('queue-warning', { message: `Queue could not be saved: ${error.message}` }));
+  return required ? write : queueWrites;
+}
+function send(type, data) {
+  if (type === 'status' && items.has(data.id)) {
+    const item = items.get(data.id); const changed = item.status !== data.status;
+    Object.assign(item, data);
+    if (changed || data.output) persistQueue();
+  }
+  if (window && !window.isDestroyed()) window.webContents.send('update', { type, ...data });
+}
 function handle(channel, handler) {
   ipcMain.handle(channel, async (event, ...args) => {
     if (event.sender !== window.webContents || event.senderFrame?.url !== pathToFileURL(page).href) throw new Error('Untrusted request');
@@ -48,16 +62,19 @@ async function addFiles(paths) {
       Object.assign(item, { id, relativeDirectory: candidate.relativeDirectory, sidecars: candidate.sidecars, importWarnings: candidate.warnings });
       items.set(id, item);
       publishItem(item, id);
+      await persistQueue();
     } else { failures++; send('item', { item: { id, name: path.basename(file), status: importController.signal.aborted ? 'Cancelled' : 'Error', error: error.message, tracks: [] } }); }
     inspected++; report();
   }, preferences.inspectionConcurrency, importController.signal); } catch (error) { if (!importController.signal.aborted) throw error; }
   finally {
     send('import-result', { inspected, duplicates, failures, skipped: discovery.skipped || 0, cancelled: importController.signal.aborted, warnings });
+    await persistQueue();
     importing = false; importController = null; send('importing', { value: false });
   }
 }
 function publishItem(item, id = item.id) {
-    send('item', { item: { id, name: item.name, relativeDirectory: item.relativeDirectory, subtitleInfo: item.subtitleInfo, sidecarCount: item.sidecars?.length || 0, size: item.size, duration: item.duration, tracks: item.plan.tracks, warnings: [...item.plan.warnings, ...(item.importWarnings || [])], status: item.output ? 'Complete' : item.plan.needsConversion ? 'Ready' : item.plan.unresolved ? 'Needs attention' : 'Unchanged', output: item.output || '' } });
+    item.status = item.output ? 'Complete' : ['Error', 'Cancelled'].includes(item.status) ? item.status : item.plan.needsConversion ? 'Ready' : item.plan.unresolved ? 'Needs attention' : 'Unchanged';
+    send('item', { item: { id, name: item.name, relativeDirectory: item.relativeDirectory, subtitleInfo: item.subtitleInfo, sidecarCount: item.sidecars?.length || 0, size: item.size, duration: item.duration, tracks: item.plan.tracks, warnings: [...item.plan.warnings, ...(item.importWarnings || [])], status: item.status, error: item.error || '', output: item.output || '' } });
 }
 
 app.whenReady().then(async () => {
@@ -72,10 +89,34 @@ app.whenReady().then(async () => {
   if (settings) engine.setProfile(resolveProfile(settings));
   const loadedAppearance = await loadThemes(app.getPath('userData'));
   appearance = loadedAppearance.state; appearanceWarning = loadedAppearance.warning;
+  const recovered = await loadQueue(app.getPath('userData'), preferences);
+  const recoveryWarnings = recovered.warning ? [recovered.warning] : [];
+  const unfinished = recovered.state.items.some(item => !['Complete', 'Unchanged'].includes(item.status));
+  const restore = !unfinished || dialog.showMessageBoxSync({ type: 'question', buttons: ['Restore Queue', 'Discard'], defaultId: 0, cancelId: 1, message: 'You have an unfinished queue from your last session. Would you like to restore it?', detail: 'Interrupted jobs restart from the beginning. Recorded temporary outputs will be cleaned up.' }) === 0;
+  recoveryWarnings.push(...await cleanupInterrupted(recovered.state.items));
+  if (restore) for (const saved of recovered.state.items) {
+    try {
+      const item = await engine.inspect(saved.file);
+      Object.assign(item, saved, { temporaryOutput: '' });
+      if (item.output) { try { await fs.access(item.output); } catch { item.output = ''; } }
+      if (['Converting', 'Verifying', 'Complete'].includes(item.status) && !item.output) { item.status = 'Ready'; item.error = ''; }
+      items.set(item.id, item);
+      publishItem(item);
+    } catch (error) {
+      let completed = false;
+      if (saved.status === 'Complete' && saved.output) { try { await fs.access(saved.output); completed = true; } catch {} }
+      items.set(saved.id, { ...saved, name: path.basename(saved.file), size: 0, duration: 0, output: completed ? saved.output : '', temporaryOutput: '', status: completed ? 'Complete' : 'Error', error: completed ? '' : `Recovery: ${error.message}`, plan: { tracks: [], warnings: ['Source unavailable; re-import before converting again.'], needsConversion: false } });
+    }
+  }
+  if (!recovered.warning) await persistQueue();
   window = new BrowserWindow({ width: 1240, height: 850, minWidth: 960, minHeight: 680, backgroundColor: '#f5f5f3', title: 'Audiority', webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+  window.webContents.on('did-finish-load', () => {
+    for (const item of items.values()) publishItem(item);
+    for (const message of recoveryWarnings) send('queue-warning', { message });
+  });
   window.on('close', event => {
     if (!running && !importing) return;
     const choice = dialog.showMessageBoxSync(window, { type: 'question', buttons: ['Keep working', 'Cancel and quit'], defaultId: 0, cancelId: 0, message: importing ? 'A folder/file import is in progress.' : 'A conversion is in progress.' });
@@ -163,12 +204,13 @@ app.whenReady().then(async () => {
       engine.setProfile(settings ? resolveProfile(settings) : null);
       if (previousId !== library.activeId || previousSettings !== JSON.stringify(settings)) {
         for (const item of items.values()) {
-          if (settings) engine.replan(item);
+          if (settings && item.probe) engine.replan(item);
           delete item.output;
           publishItem(item);
         }
       }
       settingsWarning = '';
+      await persistQueue();
       return setupState();
     } finally { profileBusy = false; }
   });
@@ -185,7 +227,7 @@ app.whenReady().then(async () => {
     }
     return outputDirectory;
   });
-  handle('clear', () => { if (running || importing) throw new Error('Queue is busy.'); items.clear(); });
+  handle('clear', () => { if (running || importing) throw new Error('Queue is busy.'); items.clear(); return persistQueue(true); });
   handle('cancel', () => { controller?.abort(); });
   handle('reveal', id => { const item = items.get(id); if (item?.output) shell.showItemInFolder(item.output); });
   handle('start', async () => {
@@ -211,14 +253,24 @@ app.whenReady().then(async () => {
         send('status', { id: item.id, status: 'Converting', progress: 0, error: '' });
         const started = performance.now(); let lastProgressAt = 0;
         try {
-          const result = await engine.convert(item, outputDirectory, { signal: controller.signal, preferences, onProgress: progress => { if (progress < 0.99 && Date.now() - lastProgressAt < 150) return; lastProgressAt = Date.now(); send('status', { id: item.id, status: progress >= 0.99 && progress < 1 ? 'Verifying' : 'Converting', progress }); } });
+          const result = await engine.convert(item, outputDirectory, { signal: controller.signal, preferences, onTemporaryOutput: async temp => { item.temporaryOutput = temp; await persistQueue(true); }, onProgress: progress => { if (progress < 0.99 && Date.now() - lastProgressAt < 150) return; lastProgressAt = Date.now(); send('status', { id: item.id, status: progress >= 0.99 && progress < 1 ? 'Verifying' : 'Converting', progress }); } });
           item.output = result.output;
           send('status', { id: item.id, status: 'Complete', progress: 1, output: result.output, warnings: result.warnings });
           await record('completed', item, started, result.outputBytes);
         } catch (error) { send('status', { id: item.id, status: controller.signal.aborted ? 'Cancelled' : 'Error', error: error.message }); await record(controller.signal.aborted ? 'cancelled' : 'failed', item, started); }
       }
-    } finally { if (sleepBlocker !== null) powerSaveBlocker.stop(sleepBlocker); running = false; controller = null; send('running', { value: false }); }
+    } finally { if (sleepBlocker !== null) powerSaveBlocker.stop(sleepBlocker); await persistQueue(); running = false; controller = null; send('running', { value: false }); }
   });
   window.loadFile(page);
+});
+let queueQuitReady = false;
+app.on('before-quit', event => {
+  if (queueQuitReady) return;
+  event.preventDefault();
+  controller?.abort(); importController?.abort();
+  (async () => {
+    while (running || importing) await new Promise(resolve => setTimeout(resolve, 50));
+    await queueWrites; queueQuitReady = true; app.quit();
+  })();
 });
 app.on('window-all-closed', () => app.quit());

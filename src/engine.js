@@ -114,7 +114,7 @@ class Engine {
       if (before !== after) throw new Error(`Verification failed: subtitle/attachment content or metadata changed (stream ${source.index}).`);
     }
   }
-  async convert(item, directory, { signal, onProgress = () => {}, preferences = preferencesDefaults() } = {}) {
+  async convert(item, directory, { signal, onProgress = () => {}, onTemporaryOutput = async () => {}, preferences = preferencesDefaults() } = {}) {
     preferences = validatePreferences(preferences);
     if (!item.plan.needsConversion) return { skipped: true, reason: 'No convertible tracks; original unchanged.' };
     directory = await resolveOutputDirectory(directory, preferences.preserveFolders ? item.relativeDirectory || '' : '');
@@ -146,6 +146,7 @@ class Engine {
     });
     args.push('-progress', 'pipe:1', '-nostats', '-f', 'matroska', temp);
     try {
+      await onTemporaryOutput(temp);
       await run(this.tools.ffmpeg, args, { signal, onLine: line => {
         if (line.startsWith('out_time_us=')) onProgress(duration ? Math.min(0.99, Math.max(0, Number(line.slice(12)) / 1e6 / duration)) : 0);
       } });

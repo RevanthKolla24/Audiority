@@ -131,6 +131,7 @@ $('clear').addEventListener('click', () => safe(async () => { await api.clear();
 $('start').addEventListener('click', () => safe(() => api.start()));
 $('cancel').addEventListener('click', () => safe(() => api.cancel()));
 api.onUpdate(update => {
+  if (update.type === 'queue-warning') $('message').textContent = update.message;
   if (update.type === 'item') items.set(update.item.id, update.item);
   if (update.type === 'status' && items.has(update.id)) Object.assign(items.get(update.id), update);
   if (update.type === 'status' && ['Converting', 'Verifying'].includes(update.status)) {

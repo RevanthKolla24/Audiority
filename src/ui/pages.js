@@ -1,5 +1,5 @@
 let currentPage = 'queue', preferencesData;
-const preferenceBooleans = ['rememberOutput', 'preserveFolders', 'preventSleep', 'compact', 'reducedMotion', 'statsEnabled', 'storeFilenames'];
+const preferenceBooleans = ['clearCompletedOnRestart', 'rememberOutput', 'preserveFolders', 'preventSleep', 'compact', 'reducedMotion', 'statsEnabled', 'storeFilenames'];
 function applyPreferences(value) {
   document.documentElement.classList.toggle('compact', value.compact);
   document.documentElement.classList.toggle('reduced-motion', value.reducedMotion);

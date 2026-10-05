@@ -2,17 +2,18 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
-const preferencesDefaults = () => ({ version: 1, rememberOutput: true, outputDirectory: '', preserveFolders: true, outputSuffix: '.audiority', threads: 0, inspectionConcurrency: 2, preventSleep: true, compact: false, reducedMotion: false, statsEnabled: true, storeFilenames: false });
+const preferencesDefaults = () => ({ version: 1, clearCompletedOnRestart: false, rememberOutput: true, outputDirectory: '', preserveFolders: true, outputSuffix: '.audiority', threads: 0, inspectionConcurrency: 2, preventSleep: true, compact: false, reducedMotion: false, statsEnabled: true, storeFilenames: false });
 function validatePreferences(value) {
   if (!value || value.version !== 1) throw new Error('Invalid application settings.');
-  const result = { ...preferencesDefaults(), ...value };
+  const result = { clearCompletedOnRestart: false, ...preferencesDefaults(), ...value };
+  if (typeof result.clearCompletedOnRestart !== 'boolean') throw new Error('Invalid queue preference.');
   for (const key of ['rememberOutput', 'preserveFolders', 'preventSleep', 'compact', 'reducedMotion', 'statsEnabled', 'storeFilenames']) if (typeof result[key] !== 'boolean') throw new Error(`Invalid ${key}.`);
   if (typeof result.outputDirectory !== 'string' || result.outputDirectory.length > 4096 || (result.outputDirectory && !path.isAbsolute(result.outputDirectory))) throw new Error('Invalid output folder.');
   if (typeof result.outputSuffix !== 'string' || !/^\.[a-zA-Z0-9_-]{1,32}$/.test(result.outputSuffix)) throw new Error('Output suffix must start with a dot and contain 1–32 letters, digits, hyphens or underscores.');
   if (!Number.isInteger(result.threads) || result.threads < 0 || result.threads > 16) throw new Error('Invalid encoder thread limit.');
   if (![1, 2, 3, 4].includes(result.inspectionConcurrency)) throw new Error('Invalid inspection concurrency.');
   if (!result.rememberOutput) result.outputDirectory = '';
-  return Object.fromEntries(Object.keys(preferencesDefaults()).map(key => [key, result[key]]));
+  return Object.fromEntries([...Object.keys(preferencesDefaults()), 'clearCompletedOnRestart'].map(key => [key, result[key]]));
 }
 const counters = () => ({ completed: 0, failed: 0, cancelled: 0, sourceBytes: 0, outputBytes: 0, processingSeconds: 0, mediaSeconds: 0, encoded: 0, extracted: 0, downmixed: 0, copied: 0 });
 const statsDefaults = () => ({ version: 1, since: new Date().toISOString(), totals: counters(), codecs: {}, downmixes: {}, profiles: {}, days: {}, recent: [] });
@@ -88,4 +89,39 @@ async function inspectInOrder(candidates, inspect, publish, concurrency = 2, sig
     }
   } finally { while (pending.length) await flush(); }
 }
-module.exports = { preferencesDefaults, validatePreferences, statsDefaults, validateStats, recordJob, loadState, saveState, inspectInOrder };
+const queueDefaults = () => ({ version: 1, items: [] });
+function validateQueue(value) {
+  if (!value || value.version !== 1 || !Array.isArray(value.items)) throw new Error('Invalid saved queue.');
+  const ids = new Set();
+  const result = value.items.map(item => {
+    if (!item || typeof item.id !== 'string' || ids.has(item.id) || !path.isAbsolute(item.file || '') ||
+        !['Ready', 'Unchanged', 'Needs attention', 'Converting', 'Verifying', 'Complete', 'Error', 'Cancelled'].includes(item.status)) throw new Error('Invalid saved queue item.');
+    ids.add(item.id);
+    for (const key of ['output', 'temporaryOutput']) if (item[key] && !path.isAbsolute(item[key])) throw new Error('Invalid queue output path.');
+    if (item.relativeDirectory && (path.isAbsolute(item.relativeDirectory) || item.relativeDirectory.split(/[\\/]/).includes('..'))) throw new Error('Invalid queue folder.');
+    if (item.sidecars && (!Array.isArray(item.sidecars) || item.sidecars.some(s => !path.isAbsolute(s.file || '') || typeof s.suffix !== 'string' || /[\\/]/.test(s.suffix)))) throw new Error('Invalid queue subtitles.');
+    return { id: item.id, file: item.file, status: item.status, output: item.output || '', temporaryOutput: item.temporaryOutput || '', relativeDirectory: item.relativeDirectory || '', sidecars: item.sidecars || [], importWarnings: (item.importWarnings || []).filter(w => typeof w === 'string'), error: typeof item.error === 'string' ? item.error : '' };
+  });
+  return { version: 1, items: result };
+}
+async function loadQueue(directory, { clearCompletedOnRestart = false } = {}) {
+  const loaded = await loadState(directory, 'queue.json', queueDefaults, validateQueue);
+  if (clearCompletedOnRestart) loaded.state.items = loaded.state.items.filter(item => item.status !== 'Complete');
+  return loaded;
+}
+async function saveQueue(directory, itemsMap) {
+  return saveState(directory, 'queue.json', { version: 1, items: [...itemsMap.values()] }, validateQueue);
+}
+async function cleanupInterrupted(items) {
+  const warnings = [];
+  for (const item of items) {
+    if (!['Converting', 'Verifying'].includes(item.status) || !item.temporaryOutput) continue;
+    const temp = item.temporaryOutput;
+    // Delete only the exact recorded application partial, never a directory or symlink.
+    if (!/^\..+\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.partial\.mkv$/i.test(path.basename(temp)) || temp === item.file || temp === item.output) continue;
+    try { const stat = await fs.lstat(temp); if (stat.isFile() && !stat.isSymbolicLink()) await fs.unlink(temp); }
+    catch (error) { if (error.code !== 'ENOENT') warnings.push(`Could not remove interrupted output: ${error.message}`); }
+  }
+  return warnings;
+}
+module.exports = { preferencesDefaults, validatePreferences, statsDefaults, validateStats, recordJob, loadState, saveState, inspectInOrder, loadQueue, saveQueue, validateQueue, cleanupInterrupted };
