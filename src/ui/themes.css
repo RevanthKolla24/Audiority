@@ -1,0 +1,27 @@
+:root {
+  --theme-background: #f6f6f4;
+  --theme-surface: #ffffff;
+  --theme-sidebar: #edede8;
+  --theme-text: #24272b;
+  --theme-muted: #727671;
+  --theme-accent: #365f52;
+  --theme-accentText: #ffffff;
+  --theme-border: #deded8;
+  --theme-hover: #edf0e9;
+  --theme-warning: #916630;
+  --theme-warningBackground: #faf5e9;
+  --theme-danger: #a44537;
+  --theme-dangerBackground: #faeae4;
+}
+.primary,.brand-mark { color:var(--theme-accentText); }
+.primary:hover:enabled { background:var(--theme-accent); opacity:.9; }
+.import-controls,.queue-pagination,.theme-actions { display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin:14px 0; }
+#import-progress { color:var(--theme-muted); font-size:11px; }
+#import-result { white-space:pre-wrap; overflow-wrap:anywhere; font-size:11px; color:var(--theme-muted); }
+.queue-pagination { justify-content:space-between; }
+#appearance-dialog { width:680px; max-width:90vw; max-height:90vh; overflow:auto; }
+#appearance-dialog label { display:block; font-size:11px; margin:12px 0 6px; color:var(--theme-text); }
+#appearance-dialog input[type=color] { height:36px; padding:3px; cursor:pointer; }
+#theme-colors label { text-transform:capitalize; }
+#appearance-dialog .form-grid { gap:0 20px; }
+#theme-contrast { line-height:1.6; }

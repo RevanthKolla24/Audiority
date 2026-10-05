@@ -1,0 +1,224 @@
+const { app, BrowserWindow, ipcMain, dialog, shell, powerSaveBlocker } = require('electron');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const { pathToFileURL } = require('node:url');
+const { Engine } = require('./engine');
+const { toolPaths } = require('./tools');
+const { receivers, devices } = require('./catalog');
+const { defaultSettings, validateSettings, resolveProfile } = require('./profiles');
+const { loadLibrary, saveLibrary, mutateLibrary, emptyLibrary } = require('./profile-library');
+const fs = require('node:fs/promises');
+const { discoverMedia } = require('./imports');
+const { builtins, tokenNames, loadThemes, saveThemes, mutateThemes, validateTheme } = require('./themes');
+const { preferencesDefaults, validatePreferences, statsDefaults, validateStats, recordJob, loadState, saveState, inspectInOrder } = require('./app-state');
+let preferences = preferencesDefaults(), stats = statsDefaults(), preferencesWarning = '', statsWarning = '', appStateBusy = false;
+
+let window, engine, outputDirectory = '', running = false, importing = false, profileBusy = false, controller, settings = null, settingsWarning = '', library = emptyLibrary();
+const items = new Map();
+let importController, appearance, appearanceWarning = '', appearanceBusy = false;
+const page = path.join(__dirname, 'ui', 'index.html');
+function send(type, data) { if (window && !window.isDestroyed()) window.webContents.send('update', { type, ...data }); }
+function handle(channel, handler) {
+  ipcMain.handle(channel, async (event, ...args) => {
+    if (event.sender !== window.webContents || event.senderFrame?.url !== pathToFileURL(page).href) throw new Error('Untrusted request');
+    return handler(...args);
+  });
+}
+async function addFiles(paths) {
+  if (running || importing || profileBusy || appStateBusy) throw new Error('Wait for the current operation to finish before importing.');
+  if (!settings) throw new Error('Complete playback setup before importing files.');
+  if (!Array.isArray(paths) || paths.some(p => typeof p !== 'string' || !path.isAbsolute(p))) throw new Error('Invalid file/folder selection.');
+  importing = true;
+  importController = new AbortController();
+  send('importing', { value: true });
+  const known = new Set([...items.values()].map(i => process.platform === 'win32' ? i.file.toLowerCase() : i.file));
+  const warnings = []; let inspected = 0, duplicates = 0, failures = 0, discovery = {};
+  let reportedAt = 0;
+  const report = () => { if (Date.now() - reportedAt < 150) return; reportedAt = Date.now(); send('import-progress', { ...discovery, inspected, duplicates, failures }); };
+  const candidates = async function* () { for await (const candidate of discoverMedia([...new Set(paths)], { outputDirectory, outputSuffix: preferences.outputSuffix, signal: importController.signal, onWarning: warning => { if (warnings.length < 30) warnings.push(warning); }, onProgress: value => { discovery = value; report(); } })) {
+    const { file } = candidate;
+    const fileKey = process.platform === 'win32' ? file.toLowerCase() : file;
+    if (known.has(fileKey)) { duplicates++; continue; }
+    known.add(fileKey);
+    yield { ...candidate, id: crypto.randomUUID() };
+  } };
+  try { await inspectInOrder(candidates(), candidate => engine.inspect(candidate.file, { signal: importController.signal }), async ({ candidate, value: item, error }) => {
+    const { id, file } = candidate;
+    if (!error) {
+      Object.assign(item, { id, relativeDirectory: candidate.relativeDirectory, sidecars: candidate.sidecars, importWarnings: candidate.warnings });
+      items.set(id, item);
+      publishItem(item, id);
+    } else { failures++; send('item', { item: { id, name: path.basename(file), status: importController.signal.aborted ? 'Cancelled' : 'Error', error: error.message, tracks: [] } }); }
+    inspected++; report();
+  }, preferences.inspectionConcurrency, importController.signal); } catch (error) { if (!importController.signal.aborted) throw error; }
+  finally {
+    send('import-result', { inspected, duplicates, failures, skipped: discovery.skipped || 0, cancelled: importController.signal.aborted, warnings });
+    importing = false; importController = null; send('importing', { value: false });
+  }
+}
+function publishItem(item, id = item.id) {
+    send('item', { item: { id, name: item.name, relativeDirectory: item.relativeDirectory, subtitleInfo: item.subtitleInfo, sidecarCount: item.sidecars?.length || 0, size: item.size, duration: item.duration, tracks: item.plan.tracks, warnings: [...item.plan.warnings, ...(item.importWarnings || [])], status: item.output ? 'Complete' : item.plan.needsConversion ? 'Ready' : item.plan.unresolved ? 'Needs attention' : 'Unchanged', output: item.output || '' } });
+}
+
+app.whenReady().then(async () => {
+  engine = new Engine(toolPaths(app.isPackaged ? process.resourcesPath : null));
+  const loadedPreferences = await loadState(app.getPath('userData'), 'app-settings.json', preferencesDefaults, validatePreferences);
+  preferences = loadedPreferences.state; preferencesWarning = loadedPreferences.warning;
+  outputDirectory = preferences.rememberOutput ? preferences.outputDirectory : '';
+  const loadedStats = await loadState(app.getPath('userData'), 'statistics.json', statsDefaults, validateStats);
+  stats = loadedStats.state; statsWarning = loadedStats.warning;
+  const loaded = await loadLibrary(app.getPath('userData'));
+  library = loaded.library; settings = library.profiles.find(p => p.id === library.activeId)?.settings || null; settingsWarning = loaded.warning;
+  if (settings) engine.setProfile(resolveProfile(settings));
+  const loadedAppearance = await loadThemes(app.getPath('userData'));
+  appearance = loadedAppearance.state; appearanceWarning = loadedAppearance.warning;
+  window = new BrowserWindow({ width: 1240, height: 850, minWidth: 960, minHeight: 680, backgroundColor: '#f5f5f3', title: 'Audiority', webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
+  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  window.webContents.on('will-navigate', event => event.preventDefault());
+  window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+  window.on('close', event => {
+    if (!running && !importing) return;
+    const choice = dialog.showMessageBoxSync(window, { type: 'question', buttons: ['Keep working', 'Cancel and quit'], defaultId: 0, cancelId: 0, message: importing ? 'A folder/file import is in progress.' : 'A conversion is in progress.' });
+    event.preventDefault();
+    if (choice === 1) { controller?.abort(); importController?.abort(); const wait = setInterval(() => { if (!running && !importing) { clearInterval(wait); window.destroy(); app.quit(); } }, 100); }
+  });
+  handle('pick-files', async () => {
+    const selection = await dialog.showOpenDialog(window, { properties: ['openFile', 'multiSelections'], title: 'Import video or audio files' });
+    if (!selection.canceled) await addFiles(selection.filePaths);
+  });
+  handle('add-files', addFiles);
+  handle('pick-import-folder', async () => {
+    const selection = await dialog.showOpenDialog(window, { properties: ['openDirectory', 'multiSelections'], title: 'Import show or media folders (includes subfolders)' });
+    if (!selection.canceled) await addFiles(selection.filePaths);
+  });
+  handle('cancel-import', () => importController?.abort());
+  handle('get-app-settings', () => ({ preferences, warning: preferencesWarning, outputDirectory, version: app.getVersion() }));
+  handle('save-app-settings', async value => {
+    if (running || importing || profileBusy || appStateBusy) throw new Error('Wait for the current operation to finish before saving settings.');
+    appStateBusy = true;
+    try {
+      const next = validatePreferences({ ...value, outputDirectory });
+      preferences = await saveState(app.getPath('userData'), 'app-settings.json', next, validatePreferences);
+      preferencesWarning = '';
+      if (!preferences.storeFilenames) {
+        stats.recent.forEach(job => { delete job.filename; });
+        if (!statsWarning) { stats = await saveState(app.getPath('userData'), 'statistics.json', stats, validateStats); await fs.unlink(path.join(app.getPath('userData'), 'statistics.json.bak')).catch(() => {}); }
+      }
+      return { preferences, outputDirectory, warning: preferencesWarning };
+    } finally { appStateBusy = false; }
+  });
+  handle('get-statistics', () => ({ stats, warning: statsWarning, enabled: preferences.statsEnabled }));
+  handle('statistics-operation', async action => {
+    if (running || appStateBusy) throw new Error('Wait until conversion/settings finish.');
+    appStateBusy = true;
+    try {
+      if (action === 'reset') {
+        const choice = await dialog.showMessageBox(window, { type: 'question', buttons: ['Cancel', 'Reset statistics'], defaultId: 0, cancelId: 0, message: 'Reset all local conversion statistics? Media files will not be touched.' });
+        if (choice.response === 1) { stats = await saveState(app.getPath('userData'), 'statistics.json', statsDefaults(), validateStats, { reset: true }); await fs.unlink(path.join(app.getPath('userData'), 'statistics.json.bak')).catch(() => {}); statsWarning = ''; }
+      } else if (action === 'export') {
+        const selection = await dialog.showSaveDialog(window, { title: 'Export statistics', defaultPath: 'audiority-statistics.json', filters: [{ name: 'JSON', extensions: ['json'] }] });
+        if (!selection.canceled) await fs.writeFile(selection.filePath, JSON.stringify(stats, null, 2));
+      } else throw new Error('Invalid statistics operation.');
+      return { stats, warning: statsWarning, enabled: preferences.statsEnabled };
+    } finally { appStateBusy = false; }
+  });
+  handle('export-diagnostics', async () => {
+    const selection = await dialog.showSaveDialog(window, { defaultPath: 'audiority-diagnostics.json', filters: [{ name: 'JSON', extensions: ['json'] }] });
+    if (!selection.canceled) await fs.writeFile(selection.filePath, JSON.stringify({ version: app.getVersion(), platform: process.platform, arch: process.arch, electron: process.versions.electron, encoders: engine.capabilities, tools: await engine.toolVersions(), limitations: ['MKV only', 'No video/GPU audio encoding', 'Development FFmpeg redistribution blocked', 'Windows validation outstanding'] }, null, 2));
+  });
+  const appearanceState = () => ({ state: appearance, builtins, tokenNames, warning: appearanceWarning });
+  handle('get-appearance', appearanceState);
+  handle('theme-operation', async action => {
+    if (appearanceBusy) throw new Error('Wait for the previous appearance change.');
+    appearanceBusy = true;
+    try {
+      if (action?.type === 'import') {
+        const selection = await dialog.showOpenDialog(window, { properties: ['openFile'], filters: [{ name: 'Audiority theme', extensions: ['json'] }] });
+        if (selection.canceled) return appearanceState();
+        const file = selection.filePaths[0];
+        if ((await fs.stat(file)).size > 65536) throw new Error('Theme files must be smaller than 64 KB.');
+        action = { type: 'save', theme: validateTheme(JSON.parse(await fs.readFile(file, 'utf8'))) };
+      }
+      if (action?.type === 'export') {
+        const theme = [...builtins, ...appearance.custom].find(t => t.id === action.id);
+        if (!theme) throw new Error('Theme not found.');
+        const selection = await dialog.showSaveDialog(window, { defaultPath: `${theme.name.replace(/[^a-zA-Z0-9 -]/g, '') || 'theme'}.json`, filters: [{ name: 'Audiority theme', extensions: ['json'] }] });
+        if (!selection.canceled) await fs.writeFile(selection.filePath, JSON.stringify(validateTheme({ ...theme, version: 1 }), null, 2));
+      } else appearance = await saveThemes(app.getPath('userData'), mutateThemes(appearance, action));
+      return appearanceState();
+    } finally { appearanceBusy = false; }
+  });
+  const setupState = () => ({ receivers, devices, defaults: defaultSettings(), library, settings, profile: settings ? resolveProfile(settings) : null, warning: settingsWarning });
+  handle('get-setup', setupState);
+  handle('preview-profile', value => resolveProfile(validateSettings(value)));
+  handle('profile-operation', async action => {
+    if (running || importing || profileBusy || appStateBusy) throw new Error('Wait until the current operation finishes before changing profiles.');
+    profileBusy = true;
+    try {
+      if (!action || typeof action !== 'object') throw new Error('Invalid profile operation.');
+      const previousId = library.activeId;
+      const previousSettings = JSON.stringify(settings);
+      library = await saveLibrary(app.getPath('userData'), mutateLibrary(library, action));
+      settings = library.profiles.find(p => p.id === library.activeId)?.settings || null;
+      engine.setProfile(settings ? resolveProfile(settings) : null);
+      if (previousId !== library.activeId || previousSettings !== JSON.stringify(settings)) {
+        for (const item of items.values()) {
+          if (settings) engine.replan(item);
+          delete item.output;
+          publishItem(item);
+        }
+      }
+      settingsWarning = '';
+      return setupState();
+    } finally { profileBusy = false; }
+  });
+  handle('pick-output', async () => {
+    if (running || importing || appStateBusy) throw new Error('Wait until the current operation finishes before changing output folder.');
+    const selection = await dialog.showOpenDialog(window, { properties: ['openDirectory', 'createDirectory'], title: 'Choose output folder' });
+    if (running || importing || appStateBusy) throw new Error('Wait until the current operation finishes before changing output folder.');
+    if (!selection.canceled) {
+      appStateBusy = true;
+      try {
+        if (preferences.rememberOutput) preferences = await saveState(app.getPath('userData'), 'app-settings.json', { ...preferences, outputDirectory: selection.filePaths[0] }, validatePreferences);
+        outputDirectory = selection.filePaths[0];
+      } finally { appStateBusy = false; }
+    }
+    return outputDirectory;
+  });
+  handle('clear', () => { if (running || importing) throw new Error('Queue is busy.'); items.clear(); });
+  handle('cancel', () => { controller?.abort(); });
+  handle('reveal', id => { const item = items.get(id); if (item?.output) shell.showItemInFolder(item.output); });
+  handle('start', async () => {
+    if (running || profileBusy || appStateBusy) throw new Error('Queue or settings operation is already running.');
+    if (importing || !settings) throw new Error('Finish import and playback setup first.');
+    if (!outputDirectory) throw new Error('Choose an output folder first.');
+    running = true;
+    controller = new AbortController();
+    send('running', { value: true });
+    const sleepBlocker = preferences.preventSleep ? powerSaveBlocker.start('prevent-app-suspension') : null;
+    const record = async (status, item, started, outputBytes = 0) => {
+      if (!preferences.statsEnabled) return;
+      try {
+        const next = recordJob(stats, { status, item, outputBytes, seconds: (performance.now() - started) / 1000, profile: library.profiles.find(p => p.id === library.activeId)?.name || '', storeFilenames: preferences.storeFilenames });
+        stats = await saveState(app.getPath('userData'), 'statistics.json', next, validateStats);
+        send('statistics-changed', {});
+      } catch (error) { statsWarning = `Statistics could not be saved: ${error.message}. Conversion results are unaffected.`; send('statistics-changed', {}); }
+    };
+    try {
+      for (const item of items.values()) {
+        if (controller.signal.aborted) break;
+        if (item.output || !item.plan.needsConversion) continue;
+        send('status', { id: item.id, status: 'Converting', progress: 0, error: '' });
+        const started = performance.now(); let lastProgressAt = 0;
+        try {
+          const result = await engine.convert(item, outputDirectory, { signal: controller.signal, preferences, onProgress: progress => { if (progress < 0.99 && Date.now() - lastProgressAt < 150) return; lastProgressAt = Date.now(); send('status', { id: item.id, status: progress >= 0.99 && progress < 1 ? 'Verifying' : 'Converting', progress }); } });
+          item.output = result.output;
+          send('status', { id: item.id, status: 'Complete', progress: 1, output: result.output, warnings: result.warnings });
+          await record('completed', item, started, result.outputBytes);
+        } catch (error) { send('status', { id: item.id, status: controller.signal.aborted ? 'Cancelled' : 'Error', error: error.message }); await record(controller.signal.aborted ? 'cancelled' : 'failed', item, started); }
+      }
+    } finally { if (sleepBlocker !== null) powerSaveBlocker.stop(sleepBlocker); running = false; controller = null; send('running', { value: false }); }
+  });
+  window.loadFile(page);
+});
+app.on('window-all-closed', () => app.quit());
