@@ -46,15 +46,12 @@ function discardTheme() { $('theme-form').hidden = true; if (appearanceData) app
 async function changeTheme(action) {
   if (themePending) return;
   themePending = true; $('theme-error').textContent = '';
-  const controls = [...$('appearance-dialog').querySelectorAll('button,input,select')];
+  const controls = [...$('appearance-panel').querySelectorAll('button,input,select')];
   controls.forEach(control => { control.disabled = true; });
   try { appearanceData = await api.themeOperation(action); discardTheme(); refreshThemes(); }
   catch (error) { $('theme-error').textContent = error.message; }
   finally { themePending = false; controls.forEach(control => { control.disabled = false; }); if (appearanceData) { const custom = appearanceData.state.custom.some(t => t.id === appearanceData.state.activeId); $('theme-edit').disabled = !custom; $('theme-delete').disabled = !custom; } }
 }
-$('appearance-open').addEventListener('click', () => { if (appearanceData) $('appearance-dialog').showModal(); });
-$('appearance-close').addEventListener('click', () => { discardTheme(); $('appearance-dialog').close(); });
-$('appearance-dialog').addEventListener('cancel', event => { if (themePending) event.preventDefault(); else discardTheme(); });
 $('theme-select').addEventListener('change', () => changeTheme({ type: 'select', id: $('theme-select').value }));
 $('theme-create').addEventListener('click', () => editTheme(false));
 $('theme-edit').addEventListener('click', () => editTheme(true));

@@ -42,6 +42,13 @@ app.on('browser-window-created', (_event, window) => {
       })()`);
       assert.ok(Object.values(progressChecks).every(Boolean), JSON.stringify(progressChecks));
       assert.equal(await execute(`!!document.getElementById('matrix-panel') && !document.getElementById('advanced-panel') && !document.getElementById('compatibility-panel')`), true);
+      await execute(`document.getElementById('advanced-rules-open').click()`);
+      assert.equal(await execute(`document.getElementById('advanced-rules-dialog').open && document.getElementById('rule-list').closest('dialog').id === 'advanced-rules-dialog' && document.getElementById('downmix-list').closest('dialog').id === 'advanced-rules-dialog'`), true);
+      await window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+      await window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+      await waitFor(`!document.getElementById('advanced-rules-dialog').open`);
+      await execute(`document.getElementById('advanced-rules-open').click(); document.getElementById('advanced-rules-done').click()`);
+      assert.equal(await execute(`!document.getElementById('advanced-rules-dialog').open`), true);
       const matrixChecks = await execute(`(() => {
         const original = readDraft();
         const legacy = { ...original, advanced: true, extractDtsCore: false, allowDownmix: true,
@@ -66,6 +73,11 @@ app.on('browser-window-created', (_event, window) => {
       })()`);
       assert.ok(Object.values(matrixChecks).every(Boolean), JSON.stringify(matrixChecks));
       assert.equal(await execute(`document.getElementById('workspace').hidden`), true);
+      assert.equal(await execute(`document.getElementById('matrix-panel').closest('#advanced-rules-dialog') !== null && !document.getElementById('advanced-rules-dialog').open`), true);
+      await execute(`document.getElementById('advanced-rules-open').click()`);
+      assert.equal(await execute(`document.getElementById('advanced-rules-dialog').open`), true);
+      await execute(`document.getElementById('advanced-rules-done').click()`);
+      await waitFor(`!document.getElementById('advanced-rules-dialog').open && document.activeElement.id === 'advanced-rules-open'`);
       await execute(`document.getElementById('avr-search').value='bose v20'; document.getElementById('avr-search').dispatchEvent(new Event('input'));`);
       assert.equal(await execute(`document.querySelectorAll('#avr-results button').length`), 1);
       await execute(`document.querySelector('#avr-results button').click(); document.getElementById('receiver-next').click();`);
@@ -96,15 +108,19 @@ app.on('browser-window-created', (_event, window) => {
       assert.equal(await execute(`document.getElementById('advanced-enabled').checked`), true);
       await execute(`document.getElementById('setup-cancel').click()`);
       assert.equal(await execute(`document.getElementById('workspace').hidden`), false);
+      await waitFor(`!document.getElementById('advanced-rules-dialog').open`);
       await waitFor(`document.getElementById('theme-select').options.length === 12`);
-      await execute(`document.getElementById('appearance-open').click(); document.getElementById('theme-select').value='graphite'; document.getElementById('theme-select').dispatchEvent(new Event('change'))`);
+      await execute(`document.getElementById('nav-settings').click()`);
+      await waitFor(`!document.getElementById('settings-page').hidden`);
+      assert.equal(await execute(`!document.querySelector('header #appearance-open') && !document.getElementById('about-toggle') && document.getElementById('about-panel').closest('#settings-page') !== null && !document.getElementById('about-panel').hidden && document.getElementById('theme-form').closest('#app-settings-form') === null`), true);
+      await execute(`document.getElementById('theme-select').value='graphite'; document.getElementById('theme-select').dispatchEvent(new Event('change'))`);
       await waitFor(`document.documentElement.dataset.theme === 'graphite' && !document.getElementById('theme-create').disabled`);
       await execute(`document.getElementById('theme-create').click(); document.getElementById('theme-name').value='Custom smoke theme'; document.querySelector('#theme-colors input[data-token="accent"]').value='#77bbcc'; document.getElementById('theme-form').dispatchEvent(new Event('input')); document.getElementById('theme-form').requestSubmit()`);
       await waitFor(`document.getElementById('theme-select').options.length === 13 && document.getElementById('theme-form').hidden`);
       assert.equal(await execute(`document.documentElement.style.getPropertyValue('--theme-accent')`),'#77bbcc');
       await execute(`document.getElementById('theme-edit').click(); document.getElementById('theme-name').value='Edited smoke theme'; document.getElementById('theme-form').requestSubmit()`);
       await waitFor(`document.getElementById('theme-select').selectedOptions[0].textContent === 'Edited smoke theme'`);
-      await execute(`document.getElementById('appearance-close').click()`);
+      await execute(`document.getElementById('nav-queue').click()`);
       const { run } = require('../src/engine'); const { toolPaths } = require('../src/tools');
       const show = path.join(userData,'Anime','Season 01'); fs.mkdirSync(show,{recursive:true});
       await run(toolPaths().ffmpeg,['-v','error','-f','lavfi','-i','anullsrc=r=48000:cl=stereo','-t','0.1','-c:a','flac',path.join(show,'Episode 01.mkv')]);
@@ -127,6 +143,9 @@ app.on('browser-window-created', (_event, window) => {
       const outputFolder = path.join(userData, 'Converted'); fs.mkdirSync(outputFolder);
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [outputFolder] });
       await execute(`document.getElementById('settings-pick-output').click()`);
+      await waitFor(`document.getElementById('settings-output').textContent === ${JSON.stringify(outputFolder)}`);
+      assert.equal(await execute(`document.getElementById('destination').textContent === ${JSON.stringify(outputFolder)} && document.getElementById('folder').closest('footer') !== null`), true);
+      await execute(`document.getElementById('nav-queue').click(); document.getElementById('folder').click()`);
       await waitFor(`document.getElementById('settings-output').textContent === ${JSON.stringify(outputFolder)}`);
       dialog.showOpenDialog = originalDialog;
       await execute(`document.getElementById('nav-queue').click(); document.getElementById('start').click(); document.getElementById('nav-statistics').click()`);

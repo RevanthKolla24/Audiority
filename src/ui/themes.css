@@ -19,9 +19,9 @@
 #import-progress { color:var(--theme-muted); font-size:11px; }
 #import-result { white-space:pre-wrap; overflow-wrap:anywhere; font-size:11px; color:var(--theme-muted); }
 .queue-pagination { justify-content:space-between; }
-#appearance-dialog { width:680px; max-width:90vw; max-height:90vh; overflow:auto; }
-#appearance-dialog label { display:block; font-size:11px; margin:12px 0 6px; color:var(--theme-text); }
-#appearance-dialog input[type=color] { height:36px; padding:3px; cursor:pointer; }
+#appearance-panel { width:100%; max-width:100%; }
+#appearance-panel label { display:block; font-size:11px; margin:12px 0 6px; color:var(--theme-text); }
+#appearance-panel input[type=color] { height:36px; padding:3px; cursor:pointer; }
 #theme-colors label { text-transform:capitalize; }
-#appearance-dialog .form-grid { gap:0 20px; }
+#appearance-panel .form-grid { gap:0 20px; }
 #theme-contrast { line-height:1.6; }

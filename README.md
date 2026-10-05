@@ -27,11 +27,11 @@ Subsequent launches restore the active profile. Switching profiles or editing ac
 
 ### Desktop workflow
 
-The interface uses a persistent searchable profile sidebar, compact active-profile actions, an expandable compatibility-notes section, and collapsed per-file track plans. Open **How it works** for an in-app description and limitations. The UI requires a minimum 960×680 desktop window.
+The interface uses a persistent searchable profile sidebar, compact active-profile actions, an expandable compatibility-notes section, and collapsed per-file track plans. **Settings → About Audiority** contains an in-app description and limitations. Receiver setup keeps advanced controls in the **Edit Advanced Audio Rules** modal; Done or Escape closes it without saving the profile. Output selection lives in Settings, with a clickable **Exporting to** shortcut in the queue footer. The UI requires a minimum 960×680 desktop window.
 
 ### Themes
 
-Open **Settings → Appearance** for grouped palette previews of 12 presets: Warm Light, Graphite Dark, Midnight, High Contrast, Paper, Sandstone, Ocean Light, Rose Light, OLED Black, Forest Dark, Slate and Plum Dark. The header's Appearance shortcut opens the custom editor. Create a custom theme from the current palette, preview its colors, name it, and save it. Custom themes can be edited or deleted, and themes can be exported/imported as JSON. Selection and custom palettes persist locally in `appearance.json`, independently of playback profiles. Deleting the active custom theme restores Warm Light.
+Open **Settings → Appearance** for grouped palette previews of 12 presets: Warm Light, Graphite Dark, Midnight, High Contrast, Paper, Sandstone, Ocean Light, Rose Light, OLED Black, Forest Dark, Slate and Plum Dark. Theme selection, custom color editing and JSON import/export are all available inline in Settings. Create a custom theme from the current palette, preview its colors, name it, and save it. Custom themes can be edited or deleted, and themes can be exported/imported as JSON. Selection and custom palettes persist locally in `appearance.json`, independently of playback profiles. Deleting the active custom theme restores Warm Light.
 
 ### Application settings and statistics
 

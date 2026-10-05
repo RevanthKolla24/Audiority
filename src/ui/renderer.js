@@ -5,6 +5,16 @@ const expandedTracks = new Set();
 let running = false, importing = false, output = '', queuePage = 0, renderScheduled = false;
 const queuePageSize = 50;
 function scheduleRender() { if (renderScheduled) return; renderScheduled = true; requestAnimationFrame(() => { renderScheduled = false; render(); }); }
+function syncOutputFolder() {
+  $('destination').textContent = output || 'No folder selected';
+  $('folder').title = output || 'Choose output folder';
+  $('settings-output').textContent = output || 'No output folder selected';
+}
+async function chooseOutputFolder() {
+  const selected = await api.pickOutput();
+  if (selected) output = selected;
+  syncOutputFolder(); render();
+}
 const label = codec => codec === 'dca' || codec === 'dts' ? 'DTS' : codec === 'ac3' ? 'Dolby Digital' : codec === 'eac3' ? 'Dolby Digital Plus' : codec.startsWith('pcm_') ? 'PCM' : codec.toUpperCase();
 function element(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; }
 function progressValue(item) { return Number.isFinite(item.progress) ? Math.min(1, Math.max(0, item.progress)) : 0; }
@@ -97,6 +107,7 @@ function render() {
   $('cancel').disabled = !running;
   $('clear').disabled = running || importing;
   $('folder').disabled = running || importing;
+  $('settings-pick-output').disabled = running || importing;
   $('import-folder').disabled = running || importing || profileOperationPending;
   $('cancel-import').hidden = !importing;
   $('change-setup').disabled = running || importing || profileOperationPending;
@@ -115,7 +126,7 @@ document.addEventListener('drop', event => event.preventDefault());
 $('drop').addEventListener('dragover', () => $('drop').classList.add('drag'));
 $('drop').addEventListener('dragleave', () => $('drop').classList.remove('drag'));
 $('drop').addEventListener('drop', event => { $('drop').classList.remove('drag'); importFiles(() => api.addFiles(Array.from(event.dataTransfer.files))); });
-$('folder').addEventListener('click', () => safe(async () => { output = await api.pickOutput(); $('destination').textContent = output || 'No folder selected'; $('destination').title = output; render(); }));
+$('folder').addEventListener('click', () => safe(chooseOutputFolder));
 $('clear').addEventListener('click', () => safe(async () => { await api.clear(); items.clear(); render(); }));
 $('start').addEventListener('click', () => safe(() => api.start()));
 $('cancel').addEventListener('click', () => safe(() => api.cancel()));

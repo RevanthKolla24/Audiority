@@ -162,10 +162,10 @@ function showStep(step) {
   if (step === 2) { deviceDetail(); previewProfile(); $('media-platform').focus(); } else $('avr-search').focus();
 }
 function enterWorkspace(profile) {
+  if ($('advanced-rules-dialog').open) $('advanced-rules-dialog').close();
   if (typeof showPage === 'function') showPage('queue');
   $('setup').hidden = true; $('workspace').hidden = false;
   $('view-title').textContent = 'Conversion queue';
-  $('about-panel').hidden = true;
   $('active-profile').textContent = profileText(profile);
   $('active-warnings').replaceChildren(...profile.warnings.map(w => element('p', 'warning-text', w)));
   $('active-warnings').hidden = !profile.warnings.length;
@@ -176,13 +176,13 @@ function enterWorkspace(profile) {
   render();
 }
 function openSetup(newProfile = false) {
+  if ($('advanced-rules-dialog').open) $('advanced-rules-dialog').close();
   if (running || importing || managingProfiles || !setupData) return;
   if (typeof showPage === 'function') showPage('queue');
   editingId = newProfile ? null : setupData.library.activeId;
   const record = setupData.library.profiles.find(p => p.id === editingId);
   $('profile-name').value = record?.name || '';
   $('view-title').textContent = record ? 'Edit playback profile' : 'Create a playback profile';
-  $('about-panel').hidden = true;
   fillDraft(record?.settings || setupData.defaults); $('workspace').hidden = true; $('setup').hidden = false;
   $('setup-cancel').hidden = !savedSettings; showStep(1); renderProfiles();
 }
@@ -199,7 +199,13 @@ $('avr-search').addEventListener('keydown', event => {
   if (event.key === 'Enter' && activeOption >= 0 && !$('avr-results').hidden) { event.preventDefault(); options[activeOption].click(); }
 });
 document.addEventListener('click', event => { if (!event.target.closest('.combobox')) { $('avr-results').hidden = true; $('avr-search').setAttribute('aria-expanded', 'false'); } });
-$('custom-receiver').addEventListener('click', () => { selectedReceiver = ''; $('avr-search').value = ''; $('advanced-enabled').checked = true; $('matrix-panel').open = true; receiverDetail(); });
+$('advanced-rules-open').addEventListener('click', () => $('advanced-rules-dialog').showModal());
+$('advanced-rules-done').addEventListener('click', () => $('advanced-rules-dialog').close());
+$('advanced-rules-dialog').addEventListener('close', () => {
+  receiverDetail();
+  if (!$('setup').hidden) $('advanced-rules-open').focus();
+});
+$('custom-receiver').addEventListener('click', () => { selectedReceiver = ''; $('avr-search').value = ''; $('advanced-enabled').checked = true; $('matrix-panel').open = true; receiverDetail(); $('advanced-rules-dialog').showModal(); });
 $('advanced-enabled').addEventListener('change', receiverDetail);
 $('add-rule').addEventListener('click', () => { if ($('rule-list').children.length < 40) ruleRow(); });
 $('reset-advanced').addEventListener('click', () => { const current = readDraft(); fillDraft({ ...setupData.defaults, receiverId: current.receiverId, advanced: current.advanced, platform: current.platform, deviceId: current.deviceId, player: current.player, connection: current.connection, tv: current.tv, passthrough: current.passthrough, pathConfirmed: current.pathConfirmed, pathCodecs: current.pathCodecs }); });
@@ -279,5 +285,3 @@ $('profile-dialog-form').addEventListener('submit', async event => {
   catch (error) { $('dialog-error').textContent = error.message; }
   finally { $('dialog-confirm').disabled = false; }
 });
-$('about-toggle').addEventListener('click', () => { $('about-panel').hidden = !$('about-panel').hidden; if (!$('about-panel').hidden) $('about-panel').scrollIntoView({ behavior: 'smooth' }); });
-$('about-close').addEventListener('click', () => { $('about-panel').hidden = true; window.scrollTo({ top: 0, behavior: 'smooth' }); });

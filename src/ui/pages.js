@@ -11,7 +11,7 @@ function fillPreferences(data) {
   $('settings-output').textContent = data.outputDirectory || 'No output folder selected';
   $('settings-result').textContent = data.warning || '';
   applyPreferences(data.preferences);
-  output = data.outputDirectory || ''; $('destination').textContent = output || 'No folder selected';
+  output = data.outputDirectory || ''; syncOutputFolder();
   renderPresetThemes();
 }
 function renderPresetThemes() {
@@ -34,7 +34,6 @@ function showPage(page) {
   $('settings-page').hidden = page !== 'settings'; $('statistics-page').hidden = page !== 'statistics';
   $('setup').hidden = page !== 'queue' || !!savedSettings;
   $('workspace').hidden = page !== 'queue' || !savedSettings;
-  $('about-panel').hidden = true;
   for (const name of ['queue', 'settings', 'statistics']) { if (page === name) $(`nav-${name}`).setAttribute('aria-current', 'page'); else $(`nav-${name}`).removeAttribute('aria-current'); }
   $('view-title').textContent = page === 'settings' ? 'Settings' : page === 'statistics' ? 'Statistics' : savedSettings ? 'Conversion queue' : 'Create a playback profile';
   if (page === 'queue') render();
@@ -54,8 +53,7 @@ $('app-settings-form').addEventListener('submit', event => { event.preventDefaul
   try { fillPreferences(await api.saveAppSettings(value)); $('settings-result').textContent = 'Settings saved.'; }
   finally { $('settings-save').disabled = false; }
 }); });
-$('settings-pick-output').addEventListener('click', () => safe(async () => { output = await api.pickOutput(); $('settings-output').textContent = output; $('destination').textContent = output; }));
-$('settings-custom-theme').addEventListener('click', () => $('appearance-open').click());
+$('settings-pick-output').addEventListener('click', () => safe(chooseOutputFolder));
 $('settings-edit-profile').addEventListener('click', () => safe(async () => { if (!savedSettings) throw new Error('Create a playback profile first.'); showPage('queue'); openSetup(); }));
 $('settings-diagnostics').addEventListener('click', () => safe(() => api.exportDiagnostics()));
 const gb = bytes => `${(bytes / 1e9).toFixed(2)} GB`;
