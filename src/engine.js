@@ -255,9 +255,11 @@ class Engine {
     const originalAudio = item.plan.tracks.map(t => item.probe.streams.find(s => s.index === t.index));
     const duplicated = item.plan.tracks.map((track, i) => track.keepOriginal ? i : -1).filter(i => i >= 0);
     const sourceDefault = originalAudio.findIndex(s => s.disposition?.default);
-    const defaultSource = sourceDefault >= 0 ? sourceDefault : duplicated[0];
+    const defaultSource = sourceDefault >= 0 ? sourceDefault : (duplicated[0] ?? item.plan.tracks.findIndex(track => track.action !== 'copy'));
+    // Audio-relative indices: appended counterparts inherit their source's default.
+    // With no source default, prefer the first compatibility track if one exists.
     const defaultOutput = duplicated.includes(defaultSource) ? item.plan.tracks.length + duplicated.indexOf(defaultSource) : defaultSource;
-    if (duplicated.length) for (let i = 0; i < item.plan.tracks.length + duplicated.length; i++) {
+    if (duplicated.length || (sourceDefault < 0 && defaultSource >= 0)) for (let i = 0; i < item.plan.tracks.length + duplicated.length; i++) {
       const source = i < originalAudio.length ? originalAudio[i] : originalAudio[duplicated[i - originalAudio.length]];
       const flags = Object.entries(source.disposition || {}).filter(([key, value]) => key !== 'default' && value).map(([key]) => key);
       if (i === defaultOutput) flags.push('default');
@@ -283,6 +285,13 @@ class Engine {
       // Stereo means combining surround contributions into left/right, not just dropping speakers.
       // rematrix_maxval limits mixing coefficients; it is not a guarantee against every clipping case.
       if (track.downmix) filters.push(`aresample=out_chlayout=${track.layout}:rematrix_maxval=1`);
+      // Boost only the remixed 7.1 -> 5.1 center, not all dialogue or all channels.
+      // Gain needs headroom: 1.5x may clip loud center peaks; normalization is separate.
+      if (track.downmix && track.sourceLayout === '7.1' && ['5.1', '5.1(side)'].includes(track.layout) &&
+          (preferences.dialogueBoost || this.profile?.dialogueBoost || this.profile?.settings?.dialogueBoost)) {
+        const surround = track.layout === '5.1(side)' ? ['SL', 'SR'] : ['BL', 'BR'];
+        filters.push(`pan=${track.layout}|FL=FL|FR=FR|FC=1.5*FC|LFE=LFE|${surround[0]}=${surround[0]}|${surround[1]}=${surround[1]}`);
+      }
       // dynaudnorm adjusts time-varying gain (150 ms frames, 15-frame smoothing window).
       // It changes overall dynamics, not dialogue independently, and only runs on encoded tracks.
       if (preferences.normalizeVolume || this.profile?.settings?.normalizeVolume) filters.push('dynaudnorm=f=150:g=15');

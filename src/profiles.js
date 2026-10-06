@@ -6,7 +6,7 @@
 const { receivers, devices } = require('./catalog');
 const FORMATS = ['dts', 'ac3', 'pcm'];
 const INPUTS = ['ac3', 'eac3', 'dts', 'dtshd', 'truehd', 'pcm', 'flac', 'alac', 'aac', 'mp3', 'opus', 'vorbis'];
-const defaultSettings = () => ({ version: 1, allowedLanguages: [], keepDefaultTrack: true, keepOriginal: false, normalizeVolume: false, receiverId: '', advanced: false, allowed: ['dts', 'ac3', 'pcm'], preserve: true, lossless: 'dts', lossy: 'ac3', stereo: 'pcm', ac3Bitrate: 640, dtsBitrate: 1411200, pcmBits: 24, pcmRate: 48000, rules: [], extractDtsCore: true, allowDownmix: false, downmixRules: [{ source: '7.1', target: '5.1(side)' }], excludedFormats: [], platform: 'local', deviceId: 'custom', player: '', connection: 'hdmi', tv: '', passthrough: 'unknown', pathConfirmed: false, pathCodecs: ['ac3', 'pcm'] });
+const defaultSettings = () => ({ version: 1, allowedLanguages: [], keepDefaultTrack: true, keepOriginal: false, normalizeVolume: false, dialogueBoost: false, receiverId: '', advanced: false, allowed: ['dts', 'ac3', 'pcm'], preserve: true, lossless: 'dts', lossy: 'ac3', stereo: 'pcm', ac3Bitrate: 640, dtsBitrate: 1411200, pcmBits: 24, pcmRate: 48000, rules: [], extractDtsCore: true, allowDownmix: false, downmixRules: [{ source: '7.1', target: '5.1(side)' }], excludedFormats: [], platform: 'local', deviceId: 'custom', player: '', connection: 'hdmi', tv: '', passthrough: 'unknown', pathConfirmed: false, pathCodecs: ['ac3', 'pcm'] });
 // Validate settings: receives value. Returns checked data or throws; do not trust saved/input JSON blindly.
 function validateLanguages(value) {
   if (!Array.isArray(value) || value.length > 200 || value.some(code => typeof code !== 'string' || !/^[a-z]{3}$/i.test(code))) throw new Error('Languages must be three-letter codes such as eng, jpn.');
@@ -19,6 +19,8 @@ function validateSettings(value) {
   v.keepDefaultTrack = value.keepDefaultTrack ?? true;
   if (typeof v.keepDefaultTrack !== 'boolean') throw new Error('Invalid keepDefaultTrack.');
   v.normalizeVolume = value.normalizeVolume ?? false;
+  v.dialogueBoost = value.dialogueBoost ?? false;
+  if (typeof v.dialogueBoost !== "boolean") throw new Error("Invalid dialogueBoost.");
   v.keepOriginal = value.keepOriginal ?? false;
   if (typeof v.keepOriginal !== 'boolean') throw new Error('Invalid keepOriginal.');
   if (typeof v.normalizeVolume !== 'boolean') throw new Error('Invalid normalizeVolume.');
@@ -89,7 +91,7 @@ function resolveProfile(settings) {
   if (!allowed.length) warnings.push('No safe output format is enabled for this playback path. Tracks will be flagged unresolved.');
   const pcmBits = Math.min(s.pcmBits, s.advanced ? s.pcmBits : receiver.pcmBits);
   const pcmRate = Math.min(s.pcmRate, s.advanced ? s.pcmRate : receiver.pcmRate, ['arc', 'optical', 'coaxial', 'unknown'].includes(s.connection) ? 48000 : 192000);
-  return { settings: s, allowedLanguages: s.allowedLanguages, keepDefaultTrack: s.keepDefaultTrack, keepOriginal: s.keepOriginal, name: receiver?.name || 'Custom receiver', supported, allowed, preserve: s.preserve, extractDtsCore: s.extractDtsCore, allowDownmix: s.allowDownmix, downmixRules: s.downmixRules, excludedFormats: s.excludedFormats, lossless: s.lossless, lossy: s.lossy, stereo: s.stereo, rules: s.advanced ? s.rules : [], ac3Bitrate: s.ac3Bitrate, dtsBitrate: s.dtsBitrate, pcmBits, pcmRate, warnings };
+  return { settings: s, dialogueBoost: s.dialogueBoost, allowedLanguages: s.allowedLanguages, keepDefaultTrack: s.keepDefaultTrack, keepOriginal: s.keepOriginal, name: receiver?.name || 'Custom receiver', supported, allowed, preserve: s.preserve, extractDtsCore: s.extractDtsCore, allowDownmix: s.allowDownmix, downmixRules: s.downmixRules, excludedFormats: s.excludedFormats, lossless: s.lossless, lossy: s.lossy, stereo: s.stereo, rules: s.advanced ? s.rules : [], ac3Bitrate: s.ac3Bitrate, dtsBitrate: s.dtsBitrate, pcmBits, pcmRate, warnings };
 }
 // Source format: receives stream. Returns the calculated value for the caller.
 function sourceFormat(stream) {
