@@ -4,7 +4,7 @@
  * Learning note: async functions return Promises; await gets their result and try/catch handles failure.
  */
 let currentPage = 'queue', preferencesData;
-const preferenceBooleans = ['keepOriginal', 'normalizeVolume', 'clearCompletedOnRestart', 'rememberOutput', 'preserveFolders', 'preventSleep', 'compact', 'reducedMotion', 'statsEnabled', 'storeFilenames'];
+const preferenceBooleans = ['keepDefaultTrack', 'keepOriginal', 'normalizeVolume', 'clearCompletedOnRestart', 'rememberOutput', 'preserveFolders', 'preventSleep', 'compact', 'reducedMotion', 'statsEnabled', 'storeFilenames'];
 // Apply preferences: receives value. Updates state or visible controls; callers use the side effect.
 function applyPreferences(value) {
   document.documentElement.classList.toggle('compact', value.compact);
@@ -13,6 +13,7 @@ function applyPreferences(value) {
 // Fill preferences: receives data. See the return statements below for the result; async results are Promises.
 function fillPreferences(data) {
   preferencesData = data;
+  $('pref-allowedLanguages').value = (data.preferences.allowedLanguages || []).join(', ');
   for (const key of preferenceBooleans) $(`pref-${key}`).checked = data.preferences[key];
   for (const key of ['threads', 'inspectionConcurrency', 'outputSuffix']) $(`pref-${key}`).value = data.preferences[key];
   $('settings-output').textContent = data.outputDirectory || 'No output folder selected';
@@ -57,6 +58,7 @@ $('app-settings-form').addEventListener('submit', event => { event.preventDefaul
   const value = { ...preferencesData.preferences };
   for (const key of preferenceBooleans) value[key] = $(`pref-${key}`).checked;
   for (const key of ['threads', 'inspectionConcurrency']) value[key] = Number($(`pref-${key}`).value);
+  value.allowedLanguages = $('pref-allowedLanguages').value.split(',').map(s => s.trim()).filter(Boolean);
   value.outputSuffix = $('pref-outputSuffix').value;
   $('settings-save').disabled = true;
   try { fillPreferences(await api.saveAppSettings(value)); $('settings-result').textContent = 'Settings saved.'; }

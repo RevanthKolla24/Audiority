@@ -140,6 +140,8 @@ function fillDraft(value) {
   $('preserve-supported').checked = draft.preserve;
   $('extract-dts-core').checked = draft.extractDtsCore ?? true;
   $('allow-downmix').checked = draft.allowDownmix ?? false;
+  $('profile-allowedLanguages').value = (draft.allowedLanguages || []).join(', ');
+  $('profile-keepDefaultTrack').checked = draft.keepDefaultTrack ?? true;
   $('profile-normalize').checked = draft.normalizeVolume ?? false;
   $('profile-keep-original').checked = draft.keepOriginal ?? false;
   checkboxes('excluded-formats', sourceNames, draft.excludedFormats || []);
@@ -157,6 +159,8 @@ function fillDraft(value) {
 function readDraft() {
   draft.extractDtsCore = $('extract-dts-core').checked;
   draft.allowDownmix = $('allow-downmix').checked;
+  draft.allowedLanguages = $('profile-allowedLanguages').value.split(',').map(s => s.trim()).filter(Boolean);
+  draft.keepDefaultTrack = $('profile-keepDefaultTrack').checked;
   draft.normalizeVolume = $('profile-normalize').checked;
   draft.keepOriginal = $('profile-keep-original').checked;
   draft.excludedFormats = checked('excluded-formats');

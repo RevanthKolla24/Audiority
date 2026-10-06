@@ -26,6 +26,8 @@ contextBridge.exposeInMainWorld('audiority', {
   start: () => ipcRenderer.invoke('start'),
   prioritizeItem: id => ipcRenderer.invoke('prioritize-item', id),
   cancel: () => ipcRenderer.invoke('cancel'),
+  pause: () => ipcRenderer.invoke('pause'),
+  resume: () => ipcRenderer.invoke('resume'),
   clear: () => ipcRenderer.invoke('clear'),
   reveal: id => ipcRenderer.invoke('reveal', id),
   onUpdate: callback => { ipcRenderer.on('update', (_event, update) => callback(update)); }

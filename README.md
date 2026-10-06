@@ -1,5 +1,32 @@
 # Audiority
 
+### Queue pausing
+
+Use **Pause** beside Cancel queue to stop the queue from starting its next job.
+The active conversion, verification, publication and statistics recording finish
+normally; pausing does not suspend FFmpeg midway through an output. **Resume**
+continues with the next eligible job, respecting updated priorities. Canceling or
+quitting wakes a paused queue so shutdown cannot get stuck waiting for Resume.
+Pause state resets when a run ends and is not persisted across restarts. If paused
+during the final job, the runner waits until Resume or Cancel before ending the run.
+
+### Language filtering
+
+Settings → Processing and Advanced Audio Rules accept comma-separated three-letter
+language tags, such as `eng, jpn`. A nonempty profile list overrides the global list;
+an empty profile list inherits Settings. An empty global list disables filtering.
+Untagged, blank-language and `und` streams always stay. By default, streams marked
+default **or forced** also stay regardless of language; this protection can be disabled.
+Matching is case-insensitive, but alternate three-letter aliases are not automatically
+translated (use the codes actually present in the file).
+
+Filtering removes only embedded audio and subtitle streams. Video and attachments
+are retained and verified; external subtitle sidecars are unchanged. Filtering alone
+creates a remuxed output even when audio needs no encoding. If all tagged audio is
+excluded and default protection is disabled, an output can intentionally contain no
+audio. Original media is never modified. Re-importing or replanning uses current
+language settings; already completed outputs are not retroactively edited.
+
 ## Queue priority
 
 Click **↑ Move to Top** on a Ready item to prioritize it. Most recently prioritized items appear first on page 1 and are chosen first when the runner selects its next job. The current conversion is never interrupted. Unprioritized jobs keep their insertion order.

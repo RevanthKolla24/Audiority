@@ -41,6 +41,15 @@ app.on('browser-window-created', (_event, window) => {
         return { eta, thickness, verifying, complete, reset, offscreen };
       })()`);
       assert.ok(Object.values(progressChecks).every(Boolean), JSON.stringify(progressChecks));
+      const languageRoundTrip = await execute(`(() => {
+        const original = readDraft();
+        fillDraft({ ...original, allowedLanguages: ['eng', 'jpn'], keepDefaultTrack: false });
+        const value = readDraft();
+        const correct = value.allowedLanguages.join(',') === 'eng,jpn' && value.keepDefaultTrack === false;
+        fillDraft(original);
+        return correct && !!$('pref-allowedLanguages') && !!$('pref-keepDefaultTrack');
+      })()`);
+      assert.equal(languageRoundTrip, true);
       const reconciliationChecks = await execute(`(() => {
         const originalPage = currentPage; currentPage = 'queue';
         const make = i => ({ id: 'reconcile-' + i, name: 'Episode ' + i, status: 'Inspecting', tracks: [] });
@@ -197,7 +206,37 @@ app.on('browser-window-created', (_event, window) => {
       await execute(`document.getElementById('nav-queue').click(); chooseOutputFolder()`);
       await waitFor(`document.getElementById('settings-output').textContent === ${JSON.stringify(outputFolder)} && !document.getElementById('folder').disabled`);
       dialog.showOpenDialog = originalDialog;
-      await execute(`document.getElementById('nav-queue').click(); document.getElementById('start').click(); document.getElementById('nav-statistics').click()`);
+      // Hold the active conversion briefly so pause/resume IPC tests are deterministic,
+      // even when the real FFmpeg fixture finishes in a fraction of a second.
+      const { Engine } = require('../src/engine');
+      const originalConvert = Engine.prototype.convert;
+      let releaseConversion;
+      const conversionGate = new Promise(resolve => { releaseConversion = resolve; });
+      Engine.prototype.convert = async function (...args) { await conversionGate; return originalConvert.apply(this, args); };
+      await execute(`document.getElementById('nav-queue').click(); document.getElementById('start').click()`);
+      await waitFor(`running && !$('pause').hidden`);
+      await execute(`$('pause').click()`);
+      await waitFor(`queuePaused && !pauseRequestPending && $('pause').textContent === 'Resume'`);
+      assert.equal(await execute(`$('summary').textContent === 'Queue Paused. The active conversion will finish safely.'`), true);
+      // Repeated pause requests must not replace the resolver and strand the runner.
+      await execute(`window.audiority.pause()`);
+      await execute(`$('pause').click()`);
+      await waitFor(`!queuePaused && !pauseRequestPending && $('pause').textContent === 'Pause'`);
+      await execute(`$('pause').click()`);
+      await waitFor(`queuePaused && !pauseRequestPending`);
+      releaseConversion();
+      Engine.prototype.convert = originalConvert;
+      await waitFor(`[...items.values()].some(item => item.status === 'Complete')`);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      assert.equal(await execute(`running && queuePaused`), true);
+      // Cancel while the runner waits between jobs must wake it immediately.
+      await execute(`$('cancel').click()`);
+      await waitFor(`!running && !queuePaused && $('pause').hidden`);
+      await execute(`window.audiority.pause()`);
+      assert.equal(await execute(`queuePaused`), false);
+      await execute(`window.audiority.start()`);
+      await waitFor(`!running && !queuePaused`);
+      await execute(`document.getElementById('nav-statistics').click()`);
       await waitFor(`!document.getElementById('statistics-page').hidden && document.getElementById('stats-recent').textContent.includes('completed')`);
       fs.writeFileSync(path.join(os.tmpdir(), 'audiority-statistics-preview.png'), (await window.webContents.capturePage()).toPNG());
       const stats = JSON.parse(fs.readFileSync(path.join(userData, 'statistics.json'), 'utf8'));

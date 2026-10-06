@@ -99,11 +99,22 @@ class Engine {
   // Accepts executable paths; initializes this worker without starting any conversion.
   constructor(tools) { this.tools = tools; this.capabilities = null; this.profile = null; this.keepOriginal = false; }
   // Accepts global settings; stores original-retention behavior for later planning.
-  setPreferences(preferences) { this.keepOriginal = !!preferences.keepOriginal; }
+  setPreferences(preferences) { this.keepOriginal = !!preferences.keepOriginal; this.preferences = preferences; }
+  // Profile language lists override global ones; an empty profile list inherits Settings.
+  languageProfile() {
+    const options = this.profile?.allowedLanguages?.length ? this.profile : this.preferences || {};
+    return { ...this.profile, allowedLanguages: options.allowedLanguages || [], keepDefaultTrack: options.keepDefaultTrack ?? true };
+  }
+  plan(probe) {
+    // Apply language selection independently of codec planning, including when no profile exists.
+    const dropped = require('./policy').languageDrops(probe, this.languageProfile());
+    const plan = planFile({ ...probe, streams: probe.streams.filter(s => !dropped.includes(s.index)) }, this.capabilities, this.profile);
+    return { ...plan, droppedStreams: dropped, streamsToDrop: dropped.map(index => `0:${index}`), needsConversion: plan.needsConversion || dropped.length > 0, warnings: [...plan.warnings, ...(dropped.length ? [`Language filter removes ${dropped.length} embedded audio/subtitle stream(s).`] : [])] };
+  }
   // Accepts resolved playback constraints; stores them for subsequent jobs.
   setProfile(profile) { this.profile = profile; }
   // Accepts an inspected job; refreshes its plan and returns the job, without converting media.
-  replan(item) { item.plan = planFile(item.probe, this.capabilities, this.profile); if (this.keepOriginal) for (const track of item.plan.tracks) if (track.action !== 'copy') track.keepOriginal = true; return item; }
+  replan(item) { item.plan = this.plan(item.probe); if (this.keepOriginal) for (const track of item.plan.tracks) if (track.action !== 'copy') track.keepOriginal = true; return item; }
   // Inspects actual tool support; resolves when cached encoder capabilities are ready.
   async initialize() {
     const entries = await Promise.all(['dca', 'ac3'].map(async encoder => {
@@ -152,9 +163,9 @@ class Engine {
     for (const stream of probe.streams.filter(s => s.codec_type === 'audio' && sourceFormat(s) === 'dtshd')) {
       stream.audiorityCore = await this.inspectDtsCore(file, stream.index, signal);
     }
-    const plan = planFile(probe, this.capabilities, this.profile);
+    const plan = this.plan(probe);
     if (this.keepOriginal) for (const track of plan.tracks) if (track.action !== 'copy') track.keepOriginal = true;
-    if (!plan.tracks.length) throw new Error('No audio tracks found.');
+    if (!probe.streams.some(s => s.codec_type === 'audio')) throw new Error('No audio tracks found.');
     const subtitles = probe.streams.filter(s => s.codec_type === 'subtitle');
     const attachments = probe.streams.filter(s => s.codec_type === 'attachment');
     const fonts = attachments.filter(s => /\.(ttf|otf|ttc)$/i.test(s.tags?.filename || '') || /font|truetype|opentype/i.test(s.tags?.mimetype || ''));
@@ -166,7 +177,7 @@ class Engine {
     // Stream copy must preserve ASS style headers, subtitle packets and all
     // attachment payloads. No decode/render step is used or implied here.
     if (!item.plan.needsConversion) return;
-    const targets = item.probe.streams.filter(s => ['subtitle', 'attachment'].includes(s.codec_type));
+    const targets = item.probe.streams.filter(s => ['subtitle', 'attachment'].includes(s.codec_type) && !(item.plan.droppedStreams || []).includes(s.index));
     if (!targets.length) return;
     const controller = new AbortController();
     const abort = () => controller.abort();
@@ -179,7 +190,7 @@ class Engine {
       const args = ['-v', 'error', '-select_streams', String(source.index), '-show_streams', '-show_data_hash', 'sha256', '-show_entries', 'stream=codec_name,extradata_hash:stream_tags=language,title,filename,mimetype:stream_disposition=default,forced'];
       if (source.codec_type === 'subtitle') args.push('-show_packets', '-show_entries', 'stream=codec_name,extradata_hash:stream_tags=language,title,filename,mimetype:stream_disposition=default,forced:packet=data_hash');
       args.push('-of', 'json');
-      const ordinal = item.probe.streams.filter(s => s.codec_type === source.codec_type).findIndex(s => s.index === source.index);
+      const ordinal = targets.filter(s => s.codec_type === source.codec_type).findIndex(s => s.index === source.index);
       const outputArgs = [...args]; outputArgs[outputArgs.indexOf('-select_streams') + 1] = `${source.codec_type === 'subtitle' ? 's' : 't'}:${ordinal}`;
       const [before, after] = await Promise.all([
         track(hashProbe(this.tools.ffprobe, [...args, item.file], controller.signal)),
@@ -238,8 +249,10 @@ class Engine {
     // Later per-audio options override copy. Extra mappings append compatibility streams,
     // so stream indices must be matched carefully during verification, not assumed unchanged.
     const args = ['-hide_banner', '-nostdin', '-v', 'warning', '-n', '-i', item.file, '-map', '0', '-map_metadata', '0', '-map_chapters', '0', '-c', 'copy'];
+    // Negative absolute stream maps remove only selected audio/subtitle streams.
+    for (const stream of item.plan.streamsToDrop || []) args.push('-map', `-${stream}`);
     let addedAudioCount = 0;
-    const originalAudio = item.probe.streams.filter(s => s.codec_type === 'audio');
+    const originalAudio = item.plan.tracks.map(t => item.probe.streams.find(s => s.index === t.index));
     const duplicated = item.plan.tracks.map((track, i) => track.keepOriginal ? i : -1).filter(i => i >= 0);
     const sourceDefault = originalAudio.findIndex(s => s.disposition?.default);
     const defaultSource = sourceDefault >= 0 ? sourceDefault : duplicated[0];
@@ -290,7 +303,8 @@ class Engine {
         // a:i means the i-th audio stream (not absolute stream index). Compare compressed
         // packet payload hashes to prove copied/retained audio bytes were not re-encoded.
         const hashArgs = ['-v', 'error', '-select_streams', `a:${i}`, '-show_packets', '-show_data_hash', 'sha256', '-show_entries', 'packet=data_hash', '-of', 'json'];
-        const hashes = await Promise.allSettled([hashProbe(this.tools.ffprobe, [...hashArgs, item.file], signal), hashProbe(this.tools.ffprobe, [...hashArgs, temp], signal)]);
+        const inputArgs = [...hashArgs]; inputArgs[inputArgs.indexOf('-select_streams') + 1] = String(track.index);
+        const hashes = await Promise.allSettled([hashProbe(this.tools.ffprobe, [...inputArgs, item.file], signal), hashProbe(this.tools.ffprobe, [...hashArgs, temp], signal)]);
         const failure = hashes.find(result => result.status === 'rejected');
         if (failure) throw failure.reason;
         if (hashes[0].value !== hashes[1].value) throw new Error(`Verification failed: retained original audio changed (track ${i + 1}).`);
@@ -321,7 +335,7 @@ class Engine {
 
 // Accepts source job and output probe data; throws if stream counts, audio properties or duration disagree.
 function verifyOutput(item, output) {
-  const sourceStreams = item.probe.streams;
+  const sourceStreams = item.probe.streams.filter(s => !(item.plan.droppedStreams || []).includes(s.index));
   const added = item.plan.tracks.filter(t => t.keepOriginal && t.action !== 'copy').length;
   if (output.streams.length !== sourceStreams.length + added) throw new Error('Verification failed: stream count changed.');
   const audio = output.streams.filter(s => s.codec_type === 'audio');

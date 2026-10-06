@@ -9,6 +9,7 @@ const items = new Map();
 // Map keeps jobs addressable by ID; the DOM is only a visible projection of this state.
 const expandedTracks = new Set();
 let running = false, importing = false, output = '', queuePage = 0, renderScheduled = false;
+let queuePaused = false, pauseRequestPending = false;
 const queuePageSize = 50;
 // Schedule render: receives no explicit arguments (uses current state). See the return statements below for the result; async results are Promises.
 function scheduleRender() { if (renderScheduled) return; renderScheduled = true; requestAnimationFrame(() => { renderScheduled = false; render(); }); }
@@ -185,8 +186,12 @@ function render() {
   } else nav?.remove();
   $('count').textContent = items.size;
   const profileOperationPending = typeof managingProfiles !== 'undefined' && managingProfiles;
-  $('start').disabled = running || importing || profileOperationPending || !output || ![...items.values()].some(i => ['Ready', 'Error', 'Cancelled'].includes(i.status) && i.tracks?.some(t => t.action !== 'copy'));
+  $('start').disabled = running || importing || profileOperationPending || !output || ![...items.values()].some(i => ['Ready', 'Error', 'Cancelled'].includes(i.status) && (i.needsConversion || i.tracks?.some(t => t.action !== 'copy')));
   $('cancel').disabled = !running;
+  $('pause').hidden = !running;
+  $('pause').disabled = !running || pauseRequestPending;
+  $('pause').textContent = queuePaused ? 'Resume' : 'Pause';
+  $('pause').setAttribute('aria-pressed', String(queuePaused));
   $('clear').disabled = running || importing;
   $('folder').disabled = running || importing;
   $('settings-pick-output').disabled = running || importing;
@@ -195,7 +200,7 @@ function render() {
   $('change-setup').disabled = running || importing || profileOperationPending;
   for (const id of ['rename-profile', 'duplicate-profile', 'delete-profile']) $(id).disabled = running || importing || profileOperationPending;
   if (typeof renderProfiles === 'function') renderProfiles();
-  $('summary').textContent = running ? 'Converting locally. You can cancel safely.' : importing ? 'Inspecting audio tracks…' : `${[...items.values()].filter(i => i.status === 'Complete').length} completed · Originals untouched`;
+  $('summary').textContent = running && queuePaused ? 'Queue Paused. The active conversion will finish safely.' : running ? 'Converting locally. You can cancel safely.' : importing ? 'Inspecting audio tracks…' : `${[...items.values()].filter(i => i.status === 'Complete').length} completed · Originals untouched`;
 }
 // Safe: receives action. See the return statements below for the result; async results are Promises.
 async function safe(action) { $('message').textContent = ''; try { await action(); } catch (error) { $('message').textContent = error.message; } }
@@ -214,6 +219,12 @@ $('folder').addEventListener('click', () => safe(chooseOutputFolder));
 $('clear').addEventListener('click', () => safe(async () => { await api.clear(); items.clear(); render(); }));
 $('start').addEventListener('click', () => safe(() => api.start()));
 $('cancel').addEventListener('click', () => safe(() => api.cancel()));
+$('pause').addEventListener('click', () => safe(async () => {
+  if (!running || pauseRequestPending) return;
+  pauseRequestPending = true; render();
+  try { await (queuePaused ? api.resume() : api.pause()); }
+  finally { pauseRequestPending = false; render(); }
+}));
 api.onUpdate(update => {
   if (update.type === 'queue-warning') $('message').textContent = update.message;
   if (update.type === 'item') items.set(update.item.id, update.item);
@@ -222,7 +233,8 @@ api.onUpdate(update => {
     patchProgress(update);
     return;
   }
-  if (update.type === 'running') running = update.value;
+  if (update.type === 'running') { running = update.value; if (!running) queuePaused = false; }
+  if (update.type === 'paused') queuePaused = update.value;
   if (update.type === 'importing') importing = update.value;
   if (update.type === 'import-progress') $('import-progress').textContent = `${update.found || 0} found · ${update.inspected || 0} inspected · ${update.skipped || 0} skipped`;
   if (update.type === 'import-result') {

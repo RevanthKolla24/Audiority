@@ -120,9 +120,18 @@ function planProfileTrack(stream, capabilities, profile) {
 }
 
 // Plan file: receives probe, capabilities, profile. See the return statements below for the result; async results are Promises.
+function languageDrops(probe, profile) {
+  const allowed = profile?.allowedLanguages || [];
+  return (probe.streams || []).filter(s => {
+    if (!allowed.length || !['audio', 'subtitle'].includes(s.codec_type)) return false;
+    const language = (s.tags?.language || 'und').trim().toLowerCase();
+    return language && language !== 'und' && !allowed.includes(language) && !(profile.keepDefaultTrack !== false && (s.disposition?.default || s.disposition?.forced));
+  }).map(s => s.index);
+}
 function planFile(probe, capabilities, profile) {
-  const tracks = (probe.streams || []).filter(s => s.codec_type === 'audio').map(s => planTrack(s, capabilities, profile));
-  return { tracks, needsConversion: tracks.some(t => t.action !== 'copy'), warnings: [...(profile?.warnings || []), ...tracks.filter(t => t.warning).map(t => t.reason)], unresolved: tracks.some(t => t.compatibility === 'unresolved') };
+  const droppedStreams = languageDrops(probe, profile);
+  const tracks = (probe.streams || []).filter(s => s.codec_type === 'audio' && !droppedStreams.includes(s.index)).map(s => planTrack(s, capabilities, profile));
+  return { tracks, droppedStreams, streamsToDrop: droppedStreams.map(index => `0:${index}`), needsConversion: droppedStreams.length > 0 || tracks.some(t => t.action !== 'copy'), warnings: [...(profile?.warnings || []), ...(droppedStreams.length ? [`Language filter removes ${droppedStreams.length} embedded audio/subtitle stream(s).`] : []), ...tracks.filter(t => t.warning).map(t => t.reason)], unresolved: tracks.some(t => t.compatibility === 'unresolved') };
 }
 
-module.exports = { classify, planTrack, planFile };
+module.exports = { classify, planTrack, planFile, languageDrops };

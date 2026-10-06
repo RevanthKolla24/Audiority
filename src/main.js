@@ -23,6 +23,20 @@ let preferences = preferencesDefaults(), stats = statsDefaults(), preferencesWar
 
 let window, engine, outputDirectory = '', running = false, importing = false, profileBusy = false, controller, settings = null, settingsWarning = '', library = emptyLibrary();
 const items = new Map();
+let isQueuePaused = false, queueResumeResolver = null, queuePausePromise = null;
+// Pause gates the next job, not the FFmpeg process already producing an output.
+function resumeQueue() {
+  isQueuePaused = false;
+  const resolve = queueResumeResolver;
+  queueResumeResolver = null; queuePausePromise = null;
+  resolve?.();
+  send('paused', { value: false });
+}
+function cancelQueue() {
+  controller?.abort();
+  // Wake a paused runner so it can observe cancellation and reach its finally block.
+  resumeQueue();
+}
 let importController, appearance, appearanceWarning = '', appearanceBusy = false;
 const page = path.join(__dirname, 'ui', 'index.html');
 let queueWrites = Promise.resolve();
@@ -87,7 +101,7 @@ async function addFiles(paths) {
 // Publish item: receives item, id = item.id. See the return statements below for the result; async results are Promises.
 function publishItem(item, id = item.id) {
     item.status = item.output ? 'Complete' : ['Error', 'Cancelled'].includes(item.status) ? item.status : item.plan.needsConversion ? 'Ready' : item.plan.unresolved ? 'Needs attention' : 'Unchanged';
-    send('item', { item: { id, priority: item.priority, name: item.name, relativeDirectory: item.relativeDirectory, subtitleInfo: item.subtitleInfo, sidecarCount: item.sidecars?.length || 0, size: item.size, duration: item.duration, tracks: item.plan.tracks, warnings: [...item.plan.warnings, ...(item.importWarnings || [])], status: item.status, error: item.error || '', output: item.output || '' } });
+    send('item', { item: { id, needsConversion: item.plan.needsConversion, droppedStreams: item.plan.droppedStreams, priority: item.priority, name: item.name, relativeDirectory: item.relativeDirectory, subtitleInfo: item.subtitleInfo, sidecarCount: item.sidecars?.length || 0, size: item.size, duration: item.duration, tracks: item.plan.tracks, warnings: [...item.plan.warnings, ...(item.importWarnings || [])], status: item.status, error: item.error || '', output: item.output || '' } });
 }
 
 app.whenReady().then(async () => {
@@ -136,7 +150,7 @@ app.whenReady().then(async () => {
     if (!running && !importing) return;
     const choice = dialog.showMessageBoxSync(window, { type: 'question', buttons: ['Keep working', 'Cancel and quit'], defaultId: 0, cancelId: 0, message: importing ? 'A folder/file import is in progress.' : 'A conversion is in progress.' });
     event.preventDefault();
-    if (choice === 1) { controller?.abort(); importController?.abort(); const wait = setInterval(() => { if (!running && !importing) { clearInterval(wait); window.destroy(); app.quit(); } }, 100); }
+    if (choice === 1) { cancelQueue(); importController?.abort(); const wait = setInterval(() => { if (!running && !importing) { clearInterval(wait); window.destroy(); app.quit(); } }, 100); }
   });
   handle('pick-files', async () => {
     const selection = await dialog.showOpenDialog(window, { properties: ['openFile', 'multiSelections'], title: 'Import video or audio files' });
@@ -246,7 +260,17 @@ app.whenReady().then(async () => {
     return outputDirectory;
   });
   handle('clear', () => { if (running || importing) throw new Error('Queue is busy.'); items.clear(); return persistQueue(true); });
-  handle('cancel', () => { controller?.abort(); });
+  handle('cancel', cancelQueue);
+  handle('pause', () => {
+    if (!running || controller?.signal.aborted) return false;
+    if (!isQueuePaused) {
+      isQueuePaused = true;
+      queuePausePromise = new Promise(resolve => { queueResumeResolver = resolve; });
+      send('paused', { value: true });
+    }
+    return true;
+  });
+  handle('resume', () => { resumeQueue(); return false; });
   handle('prioritize-item', async id => {
     if (typeof id !== 'string' || !items.has(id)) throw new Error('Unknown queue item.');
     const item = items.get(id);
@@ -267,6 +291,7 @@ app.whenReady().then(async () => {
     if (importing || !settings) throw new Error('Finish import and playback setup first.');
     if (!outputDirectory) throw new Error('Choose an output folder first.');
     running = true;
+    resumeQueue();
     controller = new AbortController();
     send('running', { value: true });
     const sleepBlocker = preferences.preventSleep ? powerSaveBlocker.start('prevent-app-suspension') : null;
@@ -281,6 +306,7 @@ app.whenReady().then(async () => {
     try {
       const attempted = new Set();
       while (true) {
+        if (isQueuePaused) await queuePausePromise;
         if (controller.signal.aborted) break;
         const item = nextQueueItem(items, attempted);
         if (!item) break;
@@ -294,7 +320,7 @@ app.whenReady().then(async () => {
           await record('completed', item, started, result.outputBytes);
         } catch (error) { send('status', { id: item.id, status: controller.signal.aborted ? 'Cancelled' : 'Error', error: error.message }); await record(controller.signal.aborted ? 'cancelled' : 'failed', item, started); }
       }
-    } finally { if (sleepBlocker !== null) powerSaveBlocker.stop(sleepBlocker); await persistQueue(); running = false; controller = null; send('running', { value: false }); }
+    } finally { resumeQueue(); if (sleepBlocker !== null) powerSaveBlocker.stop(sleepBlocker); await persistQueue(); running = false; controller = null; send('running', { value: false }); }
   });
   window.loadFile(page);
 });
@@ -302,7 +328,7 @@ let queueQuitReady = false;
 app.on('before-quit', event => {
   if (queueQuitReady) return;
   event.preventDefault();
-  controller?.abort(); importController?.abort();
+  cancelQueue(); importController?.abort();
   (async () => {
     while (running || importing) await new Promise(resolve => setTimeout(resolve, 50));
     await queueWrites; queueQuitReady = true; app.quit();
