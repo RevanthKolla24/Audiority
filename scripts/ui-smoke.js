@@ -82,6 +82,14 @@ app.on('browser-window-created', (_event, window) => {
       assert.equal(await execute(`!document.getElementById('advanced-rules-dialog').open`), true);
       const matrixChecks = await execute(`(() => {
         const original = readDraft();
+        $('profile-keep-original').checked = true;
+        if (!readDraft().keepOriginal) throw new Error('Compatibility checkbox mapping failed');
+        fillDraft(original);
+        if ($('profile-keep-original').checked !== original.keepOriginal) throw new Error('Compatibility checkbox round-trip failed');
+        $('profile-normalize').checked = true;
+        const normalization = readDraft().normalizeVolume;
+        fillDraft(original);
+        if (!normalization || $('profile-normalize').checked !== original.normalizeVolume) throw new Error('Normalization form round-trip failed');
         const legacy = { ...original, advanced: true, extractDtsCore: false, allowDownmix: true,
           excludedFormats: ['eac3', 'mp3'], downmixRules: [{ source: '7.1', target: '3.1' }],
           rules: [{ source: 'flac', scope: 'surround', target: 'dts' }, { source: 'alac', scope: 'surround', target: 'ac3' },
@@ -176,8 +184,8 @@ app.on('browser-window-created', (_event, window) => {
       await execute(`document.getElementById('settings-pick-output').click()`);
       await waitFor(`document.getElementById('settings-output').textContent === ${JSON.stringify(outputFolder)}`);
       assert.equal(await execute(`document.getElementById('destination').textContent === ${JSON.stringify(outputFolder)} && document.getElementById('folder').closest('footer') !== null`), true);
-      await execute(`document.getElementById('nav-queue').click(); document.getElementById('folder').click()`);
-      await waitFor(`document.getElementById('settings-output').textContent === ${JSON.stringify(outputFolder)}`);
+      await execute(`document.getElementById('nav-queue').click(); chooseOutputFolder()`);
+      await waitFor(`document.getElementById('settings-output').textContent === ${JSON.stringify(outputFolder)} && !document.getElementById('folder').disabled`);
       dialog.showOpenDialog = originalDialog;
       await execute(`document.getElementById('nav-queue').click(); document.getElementById('start').click(); document.getElementById('nav-statistics').click()`);
       await waitFor(`!document.getElementById('statistics-page').hidden && document.getElementById('stats-recent').textContent.includes('completed')`);

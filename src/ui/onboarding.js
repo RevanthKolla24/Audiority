@@ -122,6 +122,8 @@ function fillDraft(value) {
   $('preserve-supported').checked = draft.preserve;
   $('extract-dts-core').checked = draft.extractDtsCore ?? true;
   $('allow-downmix').checked = draft.allowDownmix ?? false;
+  $('profile-normalize').checked = draft.normalizeVolume ?? false;
+  $('profile-keep-original').checked = draft.keepOriginal ?? false;
   checkboxes('excluded-formats', sourceNames, draft.excludedFormats || []);
   $('downmix-list').replaceChildren(); (draft.downmixRules || [{ source: '7.1', target: '5.1(side)' }]).forEach(downmixRow);
   for (const key of ['lossless', 'lossy', 'stereo']) selectOptions($(`${key}-target`), ['dts', 'ac3', 'pcm'].map(f => [f, formatNames[f]]), draft[key]);
@@ -136,6 +138,8 @@ function fillDraft(value) {
 function readDraft() {
   draft.extractDtsCore = $('extract-dts-core').checked;
   draft.allowDownmix = $('allow-downmix').checked;
+  draft.normalizeVolume = $('profile-normalize').checked;
+  draft.keepOriginal = $('profile-keep-original').checked;
   draft.excludedFormats = checked('excluded-formats');
   draft.downmixRules = [...$('downmix-list').children].map(row => Object.fromEntries([...row.querySelectorAll('select')].map(select => [select.dataset.field, select.value])));
   return { ...draft, receiverId: selectedReceiver, advanced: $('advanced-enabled').checked, allowed: checked('allowed-formats'), preserve: $('preserve-supported').checked, lossless: $('lossless-target').value, lossy: $('lossy-target').value, stereo: $('stereo-target').value, ac3Bitrate: Number($('ac3-bitrate').value), dtsBitrate: Number($('dts-bitrate').value), pcmBits: Number($('pcm-bits').value), pcmRate: Number($('pcm-rate').value), rules: [...$('rule-list').children].map(row => Object.fromEntries([...row.querySelectorAll('select')].map(select => [select.dataset.field, select.value]))), platform: $('media-platform').value, deviceId: $('playback-device').value, player: $('player-app').value, connection: $('audio-connection').value, tv: $('tv-model').value, passthrough: $('passthrough').value, pathConfirmed: $('path-confirmed').checked, pathCodecs: checked('path-formats') };

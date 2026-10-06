@@ -81,6 +81,7 @@ app.whenReady().then(async () => {
   engine = new Engine(toolPaths(app.isPackaged ? process.resourcesPath : null));
   const loadedPreferences = await loadState(app.getPath('userData'), 'app-settings.json', preferencesDefaults, validatePreferences);
   preferences = loadedPreferences.state; preferencesWarning = loadedPreferences.warning;
+  engine.setPreferences(preferences);
   outputDirectory = preferences.rememberOutput ? preferences.outputDirectory : '';
   const loadedStats = await loadState(app.getPath('userData'), 'statistics.json', statsDefaults, validateStats);
   stats = loadedStats.state; statsWarning = loadedStats.warning;
@@ -141,6 +142,9 @@ app.whenReady().then(async () => {
       const next = validatePreferences({ ...value, outputDirectory });
       preferences = await saveState(app.getPath('userData'), 'app-settings.json', next, validatePreferences);
       preferencesWarning = '';
+      engine.setPreferences(preferences);
+      for (const item of items.values()) if (item.probe) { engine.replan(item); publishItem(item); }
+      await persistQueue();
       if (!preferences.storeFilenames) {
         stats.recent.forEach(job => { delete job.filename; });
         if (!statsWarning) { stats = await saveState(app.getPath('userData'), 'statistics.json', stats, validateStats); await fs.unlink(path.join(app.getPath('userData'), 'statistics.json.bak')).catch(() => {}); }

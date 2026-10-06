@@ -88,7 +88,7 @@ function patchCardState(card, item) {
     details.addEventListener('toggle', () => { if (!details.isConnected) return; if (details.open) expandedTracks.add(item.id); else expandedTracks.delete(item.id); });
     for (const [index, track] of (item.tracks || []).entries()) {
       const row = element('div', `track${track.warning ? ' warning' : ''}`);
-      row.append(element('span', '', `${index + 1}. ${label(track.sourceCodec)} · ${track.sourceLayout || track.layout || `${track.channels || '?'} channels`} · ${track.language}`), element('span', '', `${track.action === 'copy' ? 'Keep original' : `→ ${label(track.codec)}${track.sourceLayout ? ` · ${track.layout}` : ''}`} — ${track.reason}`));
+      row.append(element('span', '', `${index + 1}. ${label(track.sourceCodec)} · ${track.sourceLayout || track.layout || `${track.channels || '?'} channels`} · ${track.language}`), element('span', '', `${track.action === 'copy' ? 'Keep original' : `${track.keepOriginal ? 'Keep original + compatibility track ' : ''}→ ${label(track.codec)}${track.sourceLayout ? ` · ${track.layout}` : ''}`} — ${track.reason}`));
       details.append(row);
     }
     if (item.tracks?.length) body.append(details);

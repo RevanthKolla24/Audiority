@@ -6,6 +6,34 @@ const path = require('node:path');
 const { Engine, run } = require('../src/engine');
 const { toolPaths } = require('../src/tools');
 const { defaultSettings, resolveProfile } = require('../src/profiles');
+const { preferencesDefaults, validatePreferences } = require('../src/app-state');
+
+test('normalization defaults off, validates booleans, and encodes with downmix without touching excluded audio', { timeout: 60000 }, async () => {
+  assert.equal(preferencesDefaults().normalizeVolume, false);
+  assert.equal(defaultSettings().normalizeVolume, false);
+  assert.throws(() => validatePreferences({ ...preferencesDefaults(), normalizeVolume: 'yes' }));
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'audiority-normalize-'));
+  try {
+    const tools = toolPaths(); const engine = new Engine(tools); await engine.initialize();
+    const input = path.join(directory, 'normalize.mkv');
+    await run(tools.ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=7.1', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3', '-map', '0:a', '-map', '1:a', '-t', '3', '-c:a:0', 'flac', '-c:a:1', 'eac3', input]);
+    const settings = { ...defaultSettings(), advanced: true, allowed: ['ac3', 'pcm'], pathConfirmed: true, pathCodecs: ['ac3', 'pcm'], passthrough: 'enabled', normalizeVolume: true, allowDownmix: true, downmixRules: [{ source: '7.1', target: '3.1' }], excludedFormats: ['eac3'] };
+    const profile = resolveProfile(settings); assert.equal(profile.settings.normalizeVolume, true);
+    assert.throws(() => resolveProfile({ ...settings, normalizeVolume: 'yes' }));
+    const legacy = { ...settings }; delete legacy.normalizeVolume;
+    assert.equal(resolveProfile(legacy).settings.normalizeVolume, false);
+    const hashes = file => run(tools.ffprobe, ['-v', 'error', '-select_streams', 'a:1', '-show_packets', '-show_data_hash', 'sha256', '-show_entries', 'packet=data_hash', '-of', 'json', file]);
+    for (const global of [false, true]) {
+      engine.setProfile(resolveProfile({ ...settings, normalizeVolume: !global }));
+      const item = await engine.inspect(input);
+      const result = await engine.convert(item, directory, { preferences: { ...preferencesDefaults(), normalizeVolume: global } });
+      const probe = await engine.probe(result.output);
+      assert.equal(probe.streams[0].channels, 4);
+      assert.equal(probe.streams[0].codec_name, 'ac3');
+      assert.deepEqual(JSON.parse((await hashes(input)).stdout), JSON.parse((await hashes(result.output)).stdout));
+    }
+  } finally { await fs.rm(directory, { recursive: true, force: true }); }
+});
 
 test('real FFmpeg: mixed surround/stereo, metadata, subtitles, copy safety and cancellation', { timeout: 60000 }, async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'audiority-test-'));

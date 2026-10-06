@@ -1,5 +1,23 @@
 # Audiority
 
+## Optional compatibility tracks
+
+Enable **Create compatibility track** in Advanced Audio Rules for a profile, or in Settings → Processing globally. Both default to off; either enabled setting retains originals. Old saved settings default to off.
+
+For each encoded or DTS-core-extracted track, the original is copied unchanged and a compatibility track is appended. This includes lossy sources, not only lossless audio. Excluded and copy-only tracks are not duplicated. Downmixing and normalization affect only the appended track. Plans display “Keep original + compatibility track”.
+
+The compatibility counterpart of the original default audio becomes the default. If no original default exists, the first compatibility track is selected. Otherwise the existing default is retained; only one default is selected. Languages and original titles are preserved, and new tracks receive a compatibility title. Players can still override default flags.
+
+Outputs are larger and retained originals require extra packet verification. Compatible files still skip conversion. Statistics count processed source tracks, not the resulting total audio-stream count. Real DTS-HD core extraction still needs a dedicated regression fixture.
+
+## Optional volume normalization
+
+Enable volume normalization in **Settings → Processing**, or for one playback profile in **Advanced Audio Rules**. Both default to off; either enabled setting activates it. Older saved settings without this field default to off.
+
+Only tracks already planned for re-encoding receive `dynaudnorm=f=150:g=15`. Approved downmixing runs first in the same filter chain. Copied tracks, exclusions and DTS-core extraction remain unchanged; normalization alone does not create an output for an otherwise compatible file.
+
+This changes overall audio dynamics, not dialogue independently. It is not a fixed loudness-target pass and cannot guarantee artifact-free results. Preview representative scenes before processing a whole library.
+
 A local Electron desktop app for macOS and Windows. Import videos, review the automatically generated per-track plan, choose a folder, and convert. Video is copied without encoding; the app writes a new MKV and never replaces the input.
 
 ## Receiver and playback setup

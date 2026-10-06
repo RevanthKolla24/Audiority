@@ -12,6 +12,12 @@ function classify(stream) {
 }
 
 function planTrack(stream, capabilities, profile) {
+  const track = planTrackAction(stream, capabilities, profile);
+  if (track.action !== 'copy') track.keepOriginal = !!profile?.keepOriginal;
+  return track;
+}
+
+function planTrackAction(stream, capabilities, profile) {
   if (profile) return planProfileTrack(stream, capabilities, profile);
   const codec = stream.codec_name || 'unknown';
   const channels = Number(stream.channels);

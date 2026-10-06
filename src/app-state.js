@@ -2,10 +2,14 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
-const preferencesDefaults = () => ({ version: 1, clearCompletedOnRestart: false, rememberOutput: true, outputDirectory: '', preserveFolders: true, outputSuffix: '.audiority', threads: 0, inspectionConcurrency: 2, preventSleep: true, compact: false, reducedMotion: false, statsEnabled: true, storeFilenames: false });
+const preferencesDefaults = () => ({ version: 1, keepOriginal: false, normalizeVolume: false, clearCompletedOnRestart: false, rememberOutput: true, outputDirectory: '', preserveFolders: true, outputSuffix: '.audiority', threads: 0, inspectionConcurrency: 2, preventSleep: true, compact: false, reducedMotion: false, statsEnabled: true, storeFilenames: false });
 function validatePreferences(value) {
   if (!value || value.version !== 1) throw new Error('Invalid application settings.');
   const result = { clearCompletedOnRestart: false, ...preferencesDefaults(), ...value };
+  result.normalizeVolume = value.normalizeVolume ?? false;
+  result.keepOriginal = value.keepOriginal ?? false;
+  if (typeof result.keepOriginal !== 'boolean') throw new Error('Invalid keepOriginal.');
+  if (typeof result.normalizeVolume !== 'boolean') throw new Error('Invalid normalizeVolume.');
   if (typeof result.clearCompletedOnRestart !== 'boolean') throw new Error('Invalid queue preference.');
   for (const key of ['rememberOutput', 'preserveFolders', 'preventSleep', 'compact', 'reducedMotion', 'statsEnabled', 'storeFilenames']) if (typeof result[key] !== 'boolean') throw new Error(`Invalid ${key}.`);
   if (typeof result.outputDirectory !== 'string' || result.outputDirectory.length > 4096 || (result.outputDirectory && !path.isAbsolute(result.outputDirectory))) throw new Error('Invalid output folder.');
@@ -13,7 +17,7 @@ function validatePreferences(value) {
   if (!Number.isInteger(result.threads) || result.threads < 0 || result.threads > 16) throw new Error('Invalid encoder thread limit.');
   if (![1, 2, 3, 4].includes(result.inspectionConcurrency)) throw new Error('Invalid inspection concurrency.');
   if (!result.rememberOutput) result.outputDirectory = '';
-  return Object.fromEntries([...Object.keys(preferencesDefaults()), 'clearCompletedOnRestart'].map(key => [key, result[key]]));
+  return Object.fromEntries([...Object.keys(preferencesDefaults()), 'clearCompletedOnRestart', 'normalizeVolume', 'keepOriginal'].map(key => [key, result[key]]));
 }
 const counters = () => ({ completed: 0, failed: 0, cancelled: 0, sourceBytes: 0, outputBytes: 0, processingSeconds: 0, mediaSeconds: 0, encoded: 0, extracted: 0, downmixed: 0, copied: 0 });
 const statsDefaults = () => ({ version: 1, since: new Date().toISOString(), totals: counters(), codecs: {}, downmixes: {}, profiles: {}, days: {}, recent: [] });

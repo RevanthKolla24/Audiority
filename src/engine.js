@@ -81,9 +81,10 @@ function parseCapabilities(text) {
 }
 
 class Engine {
-  constructor(tools) { this.tools = tools; this.capabilities = null; this.profile = null; }
+  constructor(tools) { this.tools = tools; this.capabilities = null; this.profile = null; this.keepOriginal = false; }
+  setPreferences(preferences) { this.keepOriginal = !!preferences.keepOriginal; }
   setProfile(profile) { this.profile = profile; }
-  replan(item) { item.plan = planFile(item.probe, this.capabilities, this.profile); return item; }
+  replan(item) { item.plan = planFile(item.probe, this.capabilities, this.profile); if (this.keepOriginal) for (const track of item.plan.tracks) if (track.action !== 'copy') track.keepOriginal = true; return item; }
   async initialize() {
     const entries = await Promise.all(['dca', 'ac3'].map(async encoder => {
       const { stdout, stderr } = await run(this.tools.ffmpeg, ['-hide_banner', '-h', `encoder=${encoder}`]);
@@ -124,6 +125,7 @@ class Engine {
       stream.audiorityCore = await this.inspectDtsCore(file, stream.index, signal);
     }
     const plan = planFile(probe, this.capabilities, this.profile);
+    if (this.keepOriginal) for (const track of plan.tracks) if (track.action !== 'copy') track.keepOriginal = true;
     if (!plan.tracks.length) throw new Error('No audio tracks found.');
     const subtitles = probe.streams.filter(s => s.codec_type === 'subtitle');
     const attachments = probe.streams.filter(s => s.codec_type === 'attachment');
@@ -146,9 +148,11 @@ class Engine {
       const args = ['-v', 'error', '-select_streams', String(source.index), '-show_streams', '-show_data_hash', 'sha256', '-show_entries', 'stream=codec_name,extradata_hash:stream_tags=language,title,filename,mimetype:stream_disposition=default,forced'];
       if (source.codec_type === 'subtitle') args.push('-show_packets', '-show_entries', 'stream=codec_name,extradata_hash:stream_tags=language,title,filename,mimetype:stream_disposition=default,forced:packet=data_hash');
       args.push('-of', 'json');
+      const ordinal = item.probe.streams.filter(s => s.codec_type === source.codec_type).findIndex(s => s.index === source.index);
+      const outputArgs = [...args]; outputArgs[outputArgs.indexOf('-select_streams') + 1] = `${source.codec_type === 'subtitle' ? 's' : 't'}:${ordinal}`;
       const [before, after] = await Promise.all([
         track(hashProbe(this.tools.ffprobe, [...args, item.file], controller.signal)),
-        track(hashProbe(this.tools.ffprobe, [...args, outputFile], controller.signal))
+        track(hashProbe(this.tools.ffprobe, [...outputArgs, outputFile], controller.signal))
       ]);
       if (before !== after) throw new Error(`Verification failed: subtitle/attachment content or metadata changed (stream ${source.index}).`);
     };
@@ -179,6 +183,8 @@ class Engine {
   }
   async convert(item, directory, { signal, onProgress = () => {}, onTemporaryOutput = async () => {}, preferences = preferencesDefaults() } = {}) {
     preferences = validatePreferences(preferences);
+    // Use a local plan snapshot; never mutate the displayed queue during execution.
+    item = { ...item, plan: { ...item.plan, tracks: item.plan.tracks.map(track => ({ ...track, keepOriginal: track.action !== 'copy' && !!(track.keepOriginal || preferences.keepOriginal) })) } };
     if (!item.plan.needsConversion) return { skipped: true, reason: 'No convertible tracks; original unchanged.' };
     directory = await resolveOutputDirectory(directory, preferences.preserveFolders ? item.relativeDirectory || '' : '');
     const directoryStat = await fs.stat(directory);
@@ -195,17 +201,38 @@ class Engine {
     const basename = `${path.parse(item.name).name}${preferences.outputSuffix}`;
     const temp = path.join(directory, `.${basename}.${crypto.randomUUID()}.partial.mkv`);
     const args = ['-hide_banner', '-nostdin', '-v', 'warning', '-n', '-i', item.file, '-map', '0', '-map_metadata', '0', '-map_chapters', '0', '-c', 'copy'];
+    let addedAudioCount = 0;
+    const originalAudio = item.probe.streams.filter(s => s.codec_type === 'audio');
+    const duplicated = item.plan.tracks.map((track, i) => track.keepOriginal ? i : -1).filter(i => i >= 0);
+    const sourceDefault = originalAudio.findIndex(s => s.disposition?.default);
+    const defaultSource = sourceDefault >= 0 ? sourceDefault : duplicated[0];
+    const defaultOutput = duplicated.includes(defaultSource) ? item.plan.tracks.length + duplicated.indexOf(defaultSource) : defaultSource;
+    if (duplicated.length) for (let i = 0; i < item.plan.tracks.length + duplicated.length; i++) {
+      const source = i < originalAudio.length ? originalAudio[i] : originalAudio[duplicated[i - originalAudio.length]];
+      const flags = Object.entries(source.disposition || {}).filter(([key, value]) => key !== 'default' && value).map(([key]) => key);
+      if (i === defaultOutput) flags.push('default');
+      args.push(`-disposition:a:${i}`, flags.join('+') || '0');
+    }
     item.plan.tracks.forEach((track, i) => {
-      if (track.action === 'extract') { args.push(`-bsf:a:${i}`, 'dca_core'); return; }
+      if (track.action === 'copy') return;
+      const targetIndex = track.keepOriginal ? item.plan.tracks.length + addedAudioCount++ : i;
+      if (track.keepOriginal) {
+        args.push('-map', `0:${track.index}`);
+        args.push(`-metadata:s:a:${targetIndex}`, `title=${track.title ? `${track.title} · ` : ''}Compatibility (${track.codec === 'dca' ? 'DTS' : track.codec.toUpperCase()})`);
+      }
+      if (track.action === 'extract') { args.push(`-bsf:a:${targetIndex}`, 'dca_core'); return; }
       if (track.action !== 'encode') return;
-      args.push(`-c:a:${i}`, track.codec);
-      if (preferences.threads) args.push(`-threads:a:${i}`, String(preferences.threads));
-      if (track.codec === 'dca') args.push(`-strict:a:${i}`, 'experimental');
-      if (track.bitrate) args.push(`-b:a:${i}`, track.bitrate);
-      if (track.sampleRate) args.push(`-ar:a:${i}`, String(track.sampleRate));
-      if (track.downmix) args.push(`-filter:a:${i}`, `aresample=out_chlayout=${track.layout}:rematrix_maxval=1`);
+      args.push(`-c:a:${targetIndex}`, track.codec);
+      if (preferences.threads) args.push(`-threads:a:${targetIndex}`, String(preferences.threads));
+      if (track.codec === 'dca') args.push(`-strict:a:${targetIndex}`, 'experimental');
+      if (track.bitrate) args.push(`-b:a:${targetIndex}`, track.bitrate);
+      if (track.sampleRate) args.push(`-ar:a:${targetIndex}`, String(track.sampleRate));
+      const filters = [];
+      if (track.downmix) filters.push(`aresample=out_chlayout=${track.layout}:rematrix_maxval=1`);
+      if (preferences.normalizeVolume || this.profile?.settings?.normalizeVolume) filters.push('dynaudnorm=f=150:g=15');
+      if (filters.length) args.push(`-filter:a:${targetIndex}`, filters.join(','));
       // Explicit layout prevents automatic downmixing to another encoder layout.
-      args.push(`-channel_layout:a:${i}`, track.layout);
+      args.push(`-channel_layout:a:${targetIndex}`, track.layout);
     });
     args.push('-progress', 'pipe:1', '-nostats', '-f', 'matroska', temp);
     try {
@@ -216,6 +243,13 @@ class Engine {
       if (signal?.aborted) throw new Error('Cancelled');
       const output = await this.probe(temp, signal);
       verifyOutput(item, output);
+      for (const [i, track] of item.plan.tracks.entries()) if (track.keepOriginal) {
+        const hashArgs = ['-v', 'error', '-select_streams', `a:${i}`, '-show_packets', '-show_data_hash', 'sha256', '-show_entries', 'packet=data_hash', '-of', 'json'];
+        const hashes = await Promise.allSettled([hashProbe(this.tools.ffprobe, [...hashArgs, item.file], signal), hashProbe(this.tools.ffprobe, [...hashArgs, temp], signal)]);
+        const failure = hashes.find(result => result.status === 'rejected');
+        if (failure) throw failure.reason;
+        if (hashes[0].value !== hashes[1].value) throw new Error(`Verification failed: retained original audio changed (track ${i + 1}).`);
+      }
       await this.verifySubtitles(item, temp, signal);
       const { destination, copied } = await publishOutput(temp, directory, basename, { signal });
       const warnings = [...item.plan.warnings, ...(item.importWarnings || [])];
@@ -242,11 +276,17 @@ class Engine {
 
 function verifyOutput(item, output) {
   const sourceStreams = item.probe.streams;
-  if (output.streams.length !== sourceStreams.length) throw new Error('Verification failed: stream count changed.');
+  const added = item.plan.tracks.filter(t => t.keepOriginal && t.action !== 'copy').length;
+  if (output.streams.length !== sourceStreams.length + added) throw new Error('Verification failed: stream count changed.');
   const audio = output.streams.filter(s => s.codec_type === 'audio');
-  if (audio.length !== item.plan.tracks.length) throw new Error('Verification failed: audio track count changed.');
+  if (audio.length !== item.plan.tracks.length + added) throw new Error('Verification failed: audio track count changed.');
+  let addedIndex = item.plan.tracks.length;
   for (const [i, track] of item.plan.tracks.entries()) {
-    const actual = audio[i];
+    if (track.keepOriginal && track.action !== 'copy') {
+      const source = sourceStreams.find(s => s.index === track.index);
+      if (audio[i].codec_name !== source.codec_name || audio[i].channels !== source.channels || audio[i].sample_rate !== source.sample_rate || audio[i].tags?.language !== source.tags?.language || audio[i].tags?.title !== source.tags?.title) throw new Error('Verification failed: retained original audio properties changed.');
+    }
+    const actual = track.keepOriginal && track.action !== 'copy' ? audio[addedIndex++] : audio[i];
     const expectedCodec = track.codec === 'dca' ? 'dts' : track.codec;
     if (actual.codec_name !== expectedCodec || actual.channels !== track.channels) throw new Error(`Verification failed: codec or channel count changed for audio track ${i + 1}.`);
     if (track.action === 'extract' && (sourceFormat(actual) !== 'dts' || Number(actual.sample_rate) !== track.sampleRate)) throw new Error('Verification failed: extracted DTS core properties differ from plan.');
@@ -255,8 +295,10 @@ function verifyOutput(item, output) {
     const actualLayout = actual.channel_layout || (actual.codec_name.startsWith('pcm_') && actual.channels === 2 ? 'stereo' : undefined);
     if (track.layout && actualLayout !== track.layout) throw new Error(`Verification failed: channel layout changed for audio track ${i + 1}.`);
   }
-  for (const [i, source] of sourceStreams.entries()) {
-    if (source.codec_type !== 'audio' && (output.streams[i].codec_type !== source.codec_type || output.streams[i].codec_name !== source.codec_name)) throw new Error('Verification failed: a copied stream changed.');
+  for (const type of new Set(sourceStreams.filter(s => s.codec_type !== 'audio').map(s => s.codec_type))) {
+    const originals = sourceStreams.filter(s => s.codec_type === type);
+    const copies = output.streams.filter(s => s.codec_type === type);
+    if (originals.length !== copies.length || originals.some((source, i) => copies[i].codec_name !== source.codec_name)) throw new Error('Verification failed: a copied stream changed.');
   }
   const outputDuration = Number(output.format?.duration);
   if (item.duration && (!Number.isFinite(outputDuration) || Math.abs(outputDuration - item.duration) > Math.max(1, item.duration * 0.001))) throw new Error('Verification failed: output duration differs from input.');
