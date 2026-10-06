@@ -7,6 +7,35 @@ const { sourceFormat } = require('./profiles');
 const os = require('node:os');
 const { resolveOutputDirectory } = require('./imports');
 const { validatePreferences, preferencesDefaults } = require('./app-state');
+// COPYFILE_EXCL refuses existing destinations but is not atomic publication:
+// the final pathname is visible while copying. Never unlink on copy failure;
+// Node handles its failed copy, and the pathname may belong to someone else.
+async function publishOutput(temp, directory, basename, { io = fs, signal } = {}) {
+  let copyOnly = false;
+  for (let i = 0; i < 10000; i++) {
+    if (signal?.aborted) throw new Error('Cancelled');
+    const destination = path.join(directory, `${basename}${i ? ` (${i})` : ''}.mkv`);
+    if (!copyOnly) {
+      try { await io.link(temp, destination); return { destination, copied: false }; }
+      catch (error) {
+        if (error.code === 'EEXIST') continue;
+        if (!['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'EXDEV', 'EINVAL', 'ENOSYS'].includes(error.code)) throw new Error(`Cannot publish output: ${error.message}`, { cause: error });
+        copyOnly = true;
+      }
+      const size = (await io.stat(temp)).size;
+      const space = await io.statfs(directory);
+      if (space.bavail * space.bsize < size + 64 * 1024 * 1024) throw new Error('Insufficient free space for exclusive-copy publication; this filesystem requires a second full output copy.');
+    }
+    try {
+      await io.copyFile(temp, destination, require('node:fs').constants.COPYFILE_EXCL);
+      return { destination, copied: true };
+    } catch (error) {
+      if (error.code === 'EEXIST') continue;
+      throw new Error(`Cannot copy verified output without overwriting: ${error.message}`, { cause: error });
+    }
+  }
+  throw new Error('Could not find an unused output filename.');
+}
 async function hashFile(file, signal) {
   const hash = crypto.createHash('sha256');
   for await (const chunk of require('node:fs').createReadStream(file, { signal })) hash.update(chunk);
@@ -154,18 +183,9 @@ class Engine {
       const output = await this.probe(temp, signal);
       verifyOutput(item, output);
       await this.verifySubtitles(item, temp, signal);
-      // Hard-link publication is atomic and refuses to replace an existing file.
-      let destination;
-      for (let i = 0; i < 10000; i++) {
-        destination = path.join(directory, `${basename}${i ? ` (${i})` : ''}.mkv`);
-        try { await fs.link(temp, destination); break; }
-        catch (error) {
-          if (error.code !== 'EEXIST') throw new Error(`Cannot safely publish output on this filesystem: ${error.message}`);
-          destination = null;
-        }
-      }
-      if (!destination) throw new Error('Could not find an unused output filename.');
+      const { destination, copied } = await publishOutput(temp, directory, basename, { signal });
       const warnings = [...item.plan.warnings, ...(item.importWarnings || [])];
+      if (copied) warnings.push('Hard links unavailable: output published using an exclusive copy. The destination was visible during copying.');
       // Publish each matching external subtitle without overwriting anything.
       // Sidecar failures do not invalidate a verified media output; report them.
       const sidecars = [];
@@ -208,4 +228,4 @@ function verifyOutput(item, output) {
   if (item.duration && (!Number.isFinite(outputDuration) || Math.abs(outputDuration - item.duration) > Math.max(1, item.duration * 0.001))) throw new Error('Verification failed: output duration differs from input.');
 }
 
-module.exports = { Engine, run, parseCapabilities, verifyOutput, hashFile, hashProbe };
+module.exports = { Engine, run, parseCapabilities, verifyOutput, hashFile, hashProbe, publishOutput };
