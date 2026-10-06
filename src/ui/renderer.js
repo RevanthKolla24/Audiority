@@ -61,46 +61,96 @@ function patchProgress(update) {
   if (!wrap) { wrap = createProgress(item); card.append(wrap); }
   updateProgressNode(wrap, item);
 }
-function render() {
-  if (typeof currentPage !== 'undefined' && currentPage !== 'queue') return;
-  const queue = $('queue'); queue.replaceChildren();
-  if (!items.size) queue.append(element('p', '', 'Import a file to see exactly what will change.'));
-  const all = [...items.values()];
-  queuePage = Math.max(0, Math.min(queuePage, Math.ceil(all.length / queuePageSize) - 1));
-  for (const item of all.slice(queuePage * queuePageSize, (queuePage + 1) * queuePageSize)) {
+const cardSnapshots = new WeakMap();
+function createItemCard(item) {
     const card = element('article', 'item');
     card.dataset.id = item.id;
+    patchCardState(card, item);
+    return card;
+}
+function patchCardState(card, item) {
+  const previous = cardSnapshots.get(card) || {};
+  const content = JSON.stringify([item.name, item.size, item.duration, item.relativeDirectory, item.subtitleInfo, item.sidecarCount, item.tracks]);
+  if (content !== previous.content) {
+    // Rebuild only the changed plan region, retaining the card and runtime nodes.
+    let body = card.querySelector('.item-content');
+    if (!body) { body = element('div', 'item-content'); card.prepend(body); }
+    body.replaceChildren();
     const head = element('div', 'item-head');
     const info = element('div'); info.append(element('div', 'name', item.name));
-    if (item.size) info.append(element('div', 'meta', `${(item.size / 1024 ** 3).toFixed(2)} GB · ${Math.round(item.duration)} seconds · ${item.tracks.length} audio track(s)`));
-    head.append(info, element('span', `status ${item.status.toLowerCase().replaceAll(' ', '-')}`, item.status)); card.append(head);
-    if (item.relativeDirectory) card.append(element('p', 'meta', `Output: ${item.relativeDirectory}`));
-    if (item.subtitleInfo?.ass) card.append(element('p', 'warning-text', `${item.subtitleInfo.ass} ASS/SSA track(s) · ${item.subtitleInfo.fonts} embedded font(s). Subtitle content and attachments are preserved and verified; player rendering is not confirmed.`));
-    if (item.sidecarCount) card.append(element('p', 'meta', `${item.sidecarCount} external subtitle(s) will be copied alongside converted output.`));
+    if (item.size) info.append(element('div', 'meta', `${(item.size / 1024 ** 3).toFixed(2)} GB · ${Math.round(item.duration)} seconds · ${item.tracks?.length || 0} audio track(s)`));
+    head.append(info, element('span', 'status')); body.append(head);
+    if (item.relativeDirectory) body.append(element('p', 'meta', `Output: ${item.relativeDirectory}`));
+    if (item.subtitleInfo?.ass) body.append(element('p', 'warning-text', `${item.subtitleInfo.ass} ASS/SSA track(s) · ${item.subtitleInfo.fonts} embedded font(s). Subtitle content and attachments are preserved and verified; player rendering is not confirmed.`));
+    if (item.sidecarCount) body.append(element('p', 'meta', `${item.sidecarCount} external subtitle(s) will be copied alongside converted output.`));
     const details = element('details'); details.open = expandedTracks.has(item.id);
     details.append(element('summary', '', `${item.tracks?.length || 0} audio tracks · View conversion plan`));
-    details.addEventListener('toggle', () => { if (details.open) expandedTracks.add(item.id); else expandedTracks.delete(item.id); });
+    details.addEventListener('toggle', () => { if (!details.isConnected) return; if (details.open) expandedTracks.add(item.id); else expandedTracks.delete(item.id); });
     for (const [index, track] of (item.tracks || []).entries()) {
       const row = element('div', `track${track.warning ? ' warning' : ''}`);
       row.append(element('span', '', `${index + 1}. ${label(track.sourceCodec)} · ${track.sourceLayout || track.layout || `${track.channels || '?'} channels`} · ${track.language}`), element('span', '', `${track.action === 'copy' ? 'Keep original' : `→ ${label(track.codec)}${track.sourceLayout ? ` · ${track.layout}` : ''}`} — ${track.reason}`));
       details.append(row);
     }
-    if (item.tracks?.length) card.append(details);
-    if (item.progress !== undefined || ['Converting', 'Verifying', 'Complete'].includes(item.status)) card.append(createProgress(item));
-    if (item.error) card.append(element('p', 'error', item.error));
-    for (const warning of item.warnings || []) card.append(element('p', 'warning-text', warning));
-    if (item.tracks?.some(t => t.compatibility === 'unresolved')) card.append(element('p', 'warning-text', 'Some tracks remain incompatible or unconfirmed. Converting this file does not resolve those tracks.'));
-    if (item.output) { const reveal = element('button', 'quiet', 'Show converted file'); reveal.addEventListener('click', () => safe(() => api.reveal(item.id))); card.append(reveal); }
-    queue.append(card);
+    if (item.tracks?.length) body.append(details);
   }
+  const status = card.querySelector('.status');
+  if (status.textContent !== item.status) status.textContent = item.status;
+  const statusClass = `status ${item.status.toLowerCase().replaceAll(' ', '-')}`;
+  if (status.className !== statusClass) status.className = statusClass;
+  let progress = card.querySelector('.progress-wrap');
+  if (item.progress !== undefined || ['Converting', 'Verifying', 'Complete'].includes(item.status)) {
+    if (!progress) { progress = createProgress(item); card.append(progress); }
+    updateProgressNode(progress, item);
+  } else if (progress) progress.remove();
+  const messages = JSON.stringify([item.error, item.warnings, item.tracks?.some(t => t.compatibility === 'unresolved')]);
+  if (messages !== previous.messages) {
+    let region = card.querySelector('.item-messages');
+    if (!region) { region = element('div', 'item-messages'); card.append(region); }
+    region.replaceChildren();
+    if (item.error) region.append(element('p', 'error', item.error));
+    for (const warning of item.warnings || []) region.append(element('p', 'warning-text', warning));
+    if (item.tracks?.some(t => t.compatibility === 'unresolved')) region.append(element('p', 'warning-text', 'Some tracks remain incompatible or unconfirmed. Converting this file does not resolve those tracks.'));
+  }
+  let reveal = card.querySelector('.reveal-output');
+  if (item.output && !reveal) {
+    reveal = element('button', 'quiet reveal-output', 'Show converted file');
+    reveal.addEventListener('click', () => safe(() => api.reveal(item.id))); card.append(reveal);
+  } else if (!item.output && reveal) reveal.remove();
+  cardSnapshots.set(card, { content, messages });
+}
+function render() {
+  if (typeof currentPage !== 'undefined' && currentPage !== 'queue') return;
+  const queue = $('queue');
+  const all = [...items.values()];
+  queuePage = Math.max(0, Math.min(queuePage, Math.ceil(all.length / queuePageSize) - 1));
+  const pageItems = all.slice(queuePage * queuePageSize, (queuePage + 1) * queuePageSize);
+  const existing = new Map([...queue.children].filter(node => node.dataset.id).map(node => [node.dataset.id, node]));
+  const expected = pageItems.map(item => {
+    const card = existing.get(item.id);
+    if (!card) return createItemCard(item);
+    existing.delete(item.id); patchCardState(card, item); return card;
+  });
+  for (const orphan of existing.values()) orphan.remove();
+  const empty = queue.querySelector('.queue-empty') || queue.querySelector('#empty');
+  if (all.length) empty?.remove();
+  else if (!empty) queue.append(element('p', 'queue-empty', 'Import a file to see exactly what will change.'));
+  for (let i = 0; i < expected.length; i++) if (queue.children[i] !== expected[i]) queue.insertBefore(expected[i], queue.children[i] || null);
+  let nav = queue.querySelector('.queue-pagination');
   if (all.length > queuePageSize) {
-    const nav = element('div', 'queue-pagination');
+    if (!nav) {
+    nav = element('div', 'queue-pagination');
     const previous = element('button', 'quiet', '← Previous'); previous.disabled = queuePage === 0;
     previous.addEventListener('click', () => { queuePage--; render(); });
     const next = element('button', 'quiet', 'Next →'); next.disabled = (queuePage + 1) * queuePageSize >= all.length;
     next.addEventListener('click', () => { queuePage++; render(); });
     nav.append(previous, element('span', 'meta', `Page ${queuePage + 1} of ${Math.ceil(all.length / queuePageSize)}`), next); queue.append(nav);
-  }
+    }
+    nav.firstElementChild.disabled = queuePage === 0;
+    nav.lastElementChild.disabled = (queuePage + 1) * queuePageSize >= all.length;
+    const text = `Page ${queuePage + 1} of ${Math.ceil(all.length / queuePageSize)}`;
+    if (nav.querySelector('.meta').textContent !== text) nav.querySelector('.meta').textContent = text;
+    if (queue.lastElementChild !== nav) queue.append(nav);
+  } else nav?.remove();
   $('count').textContent = items.size;
   const profileOperationPending = typeof managingProfiles !== 'undefined' && managingProfiles;
   $('start').disabled = running || importing || profileOperationPending || !output || ![...items.values()].some(i => ['Ready', 'Error', 'Cancelled'].includes(i.status) && i.tracks?.some(t => t.action !== 'copy'));

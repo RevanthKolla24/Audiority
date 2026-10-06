@@ -134,13 +134,47 @@ class Engine {
   async verifySubtitles(item, outputFile, signal) {
     // Stream copy must preserve ASS style headers, subtitle packets and all
     // attachment payloads. No decode/render step is used or implied here.
-    for (const source of item.probe.streams.filter(s => ['subtitle', 'attachment'].includes(s.codec_type))) {
+    if (!item.plan.needsConversion) return;
+    const targets = item.probe.streams.filter(s => ['subtitle', 'attachment'].includes(s.codec_type));
+    if (!targets.length) return;
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    let next = 0, failure;
+    const verify = async source => {
       const args = ['-v', 'error', '-select_streams', String(source.index), '-show_streams', '-show_data_hash', 'sha256', '-show_entries', 'stream=codec_name,extradata_hash:stream_tags=language,title,filename,mimetype:stream_disposition=default,forced'];
       if (source.codec_type === 'subtitle') args.push('-show_packets', '-show_entries', 'stream=codec_name,extradata_hash:stream_tags=language,title,filename,mimetype:stream_disposition=default,forced:packet=data_hash');
       args.push('-of', 'json');
-      const before = await hashProbe(this.tools.ffprobe, [...args, item.file], signal);
-      const after = await hashProbe(this.tools.ffprobe, [...args, outputFile], signal);
+      const [before, after] = await Promise.all([
+        track(hashProbe(this.tools.ffprobe, [...args, item.file], controller.signal)),
+        track(hashProbe(this.tools.ffprobe, [...args, outputFile], controller.signal))
+      ]);
       if (before !== after) throw new Error(`Verification failed: subtitle/attachment content or metadata changed (stream ${source.index}).`);
+    };
+    const worker = async () => {
+      while (next < targets.length && !controller.signal.aborted) {
+        const source = targets[next++];
+        try { await verify(source); }
+        catch (error) { if (!failure) failure = error; controller.abort(); }
+      }
+    };
+    // Limit simultaneous readers: each stream launches an input/output pair.
+    // Drain every child before conversion cleanup can remove the temporary MKV.
+    const pending = new Set();
+    const track = promise => {
+      pending.add(promise);
+      promise.then(() => pending.delete(promise), () => pending.delete(promise));
+      return promise;
+    };
+    // Promise.all rejects early; separately drain each surviving hash process.
+    try {
+      await Promise.all(Array.from({ length: Math.min(2, targets.length) }, worker));
+      await Promise.allSettled([...pending]);
+      if (failure) throw failure;
+      if (signal?.aborted) throw new Error('Cancelled');
+    } finally {
+      signal?.removeEventListener('abort', abort);
     }
   }
   async convert(item, directory, { signal, onProgress = () => {}, onTemporaryOutput = async () => {}, preferences = preferencesDefaults() } = {}) {

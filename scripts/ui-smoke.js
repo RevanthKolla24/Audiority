@@ -41,6 +41,37 @@ app.on('browser-window-created', (_event, window) => {
         return { eta, thickness, verifying, complete, reset, offscreen };
       })()`);
       assert.ok(Object.values(progressChecks).every(Boolean), JSON.stringify(progressChecks));
+      const reconciliationChecks = await execute(`(() => {
+        const originalPage = currentPage; currentPage = 'queue';
+        const make = i => ({ id: 'reconcile-' + i, name: 'Episode ' + i, status: 'Inspecting', tracks: [] });
+        items.set('reconcile-0', make(0)); render();
+        const first = $('queue').querySelector('article');
+        const head = first.querySelector('.item-head');
+        for (let i = 1; i < 55; i++) { items.set('reconcile-' + i, make(i)); render(); }
+        const retained = first === $('queue').querySelector('article') && head === first.querySelector('.item-head');
+        const pagination = $('queue').querySelector('.queue-pagination');
+        render(); const stableNav = pagination === $('queue').querySelector('.queue-pagination');
+        const item = items.get('reconcile-0'); item.status = 'Ready';
+        item.tracks = [{ sourceCodec: 'flac', codec: 'dca', action: 'encode', channels: 6, language: 'eng', reason: 'First plan' }]; render();
+        const details = first.querySelector('details'); details.open = true; expandedTracks.add(item.id);
+        render(); const retainedDetails = details === first.querySelector('details') && details.open;
+        item.tracks[0].reason = 'Changed profile'; render();
+        const refreshed = first.textContent.includes('Changed profile') && first.querySelector('details').open;
+        item.status = 'Complete'; item.output = '/test/output.mkv'; item.progress = 1; render();
+        const complete = first.querySelector('.progress-text').textContent === 'Complete' && !!first.querySelector('.reveal-output');
+        item.status = 'Error'; item.error = 'Test failure'; item.warnings = ['Test warning']; render(); render();
+        const messages = first.querySelectorAll('.item-messages .error').length === 1 && first.textContent.includes('Test warning');
+        delete item.error; item.warnings = []; delete item.output; delete item.progress; item.status = 'Ready'; render();
+        const cleared = !first.querySelector('.item-messages .error') && !first.querySelector('.reveal-output') && !first.querySelector('.progress-wrap');
+        pagination.lastElementChild.click();
+        const nextPage = $('queue').querySelectorAll('article').length === 5 && $('queue').querySelector('article').dataset.id === 'reconcile-50';
+        for (let i = 0; i < 55; i++) items.delete('reconcile-' + i);
+        expandedTracks.delete(item.id); render();
+        const empty = !$('queue').querySelector('article') && !!$('queue').querySelector('.queue-empty');
+        currentPage = originalPage;
+        return { retained, stableNav, retainedDetails, refreshed, complete, messages, cleared, nextPage, empty };
+      })()`);
+      assert.ok(Object.values(reconciliationChecks).every(Boolean), JSON.stringify(reconciliationChecks));
       assert.equal(await execute(`!!document.getElementById('matrix-panel') && !document.getElementById('advanced-panel') && !document.getElementById('compatibility-panel')`), true);
       await execute(`document.getElementById('advanced-rules-open').click()`);
       assert.equal(await execute(`document.getElementById('advanced-rules-dialog').open && document.getElementById('rule-list').closest('dialog').id === 'advanced-rules-dialog' && document.getElementById('downmix-list').closest('dialog').id === 'advanced-rules-dialog'`), true);

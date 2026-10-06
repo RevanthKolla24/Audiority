@@ -21,8 +21,11 @@ app.on('browser-window-created', (_event, window) => {
         const patchMs = performance.now() - start;
         const retainedNode = original === document.querySelector('#queue article');
         start = performance.now(); for (let i = 0; i < 200; i++) render();
-        const rebuildMs = performance.now() - start;
-        return { queuedFiles: items.size, visibleCards: document.querySelectorAll('#queue article').length, updates: 200, retainedNode, patchMs, rebuildMs };
+        const reconcileMs = performance.now() - start;
+        const retainedAfterRender = original === document.querySelector('#queue article');
+        start = performance.now(); for (let i = 0; i < 200; i++) { $('queue').replaceChildren(); render(); }
+        const forcedRebuildMs = performance.now() - start;
+        return { queuedFiles: items.size, visibleCards: document.querySelectorAll('#queue article').length, updates: 200, retainedNode, retainedAfterRender, patchMs, reconcileMs, forcedRebuildMs };
       })()`);
       const entries = [];
       for (let i = 0; i < 300; i++) for (const name of [`Episode ${i}.mkv`, `Episode ${i}.eng.ass`]) entries.push({ name, isFile: () => true, isDirectory: () => false });
