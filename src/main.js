@@ -39,7 +39,7 @@ async function pollWatchFolder() {
   } finally { watchBusy = false; }
 }
 const { builtins, tokenNames, loadThemes, saveThemes, mutateThemes, validateTheme } = require('./themes');
-const { preferencesDefaults, validatePreferences, statsDefaults, validateStats, recordJob, loadState, saveState, inspectInOrder, loadQueue, saveQueue, cleanupInterrupted } = require('./app-state');
+const { preferencesDefaults, validatePreferences, statsDefaults, validateStats, recordJob, loadState, saveState, inspectInOrder, loadQueue, saveQueue, cleanupInterrupted, cleanupOrphanedTempFiles } = require('./app-state');
 let preferences = preferencesDefaults(), stats = statsDefaults(), preferencesWarning = '', statsWarning = '', appStateBusy = false;
 
 let window, engine, outputDirectory = '', running = false, importing = false, profileBusy = false, controller, settings = null, settingsWarning = '', library = emptyLibrary();
@@ -139,6 +139,11 @@ app.whenReady().then(async () => {
   const loadedAppearance = await loadThemes(app.getPath('userData'));
   appearance = loadedAppearance.state; appearanceWarning = loadedAppearance.warning;
   const recovered = await loadQueue(app.getPath('userData'), preferences);
+  // Await the one-time sweep before creating a window, registering job IPC or polling.
+  // Queue paths also cover previous destinations when the global destination changed.
+  const cleanupDirectories = [outputDirectory, ...recovered.state.items.flatMap(item =>
+    [item.temporaryOutput, item.output].filter(Boolean).map(file => path.dirname(file)))];
+  await cleanupOrphanedTempFiles(cleanupDirectories);
   const recoveryWarnings = recovered.warning ? [recovered.warning] : [];
   const unfinished = recovered.state.items.some(item => !['Complete', 'Unchanged'].includes(item.status));
   const restore = !unfinished || dialog.showMessageBoxSync({ type: 'question', buttons: ['Restore Queue', 'Discard'], defaultId: 0, cancelId: 1, message: 'You have an unfinished queue from your last session. Would you like to restore it?', detail: 'Interrupted jobs restart from the beginning. Recorded temporary outputs will be cleaned up.' }) === 0;

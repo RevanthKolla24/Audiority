@@ -156,4 +156,35 @@ async function cleanupInterrupted(items) {
   }
   return warnings;
 }
-module.exports = { preferencesDefaults, validatePreferences, statsDefaults, validateStats, recordJob, loadState, saveState, inspectInOrder, loadQueue, saveQueue, validateQueue, cleanupInterrupted };
+// Scan known output roots once at startup, including preserved season folders.
+// Only our hidden UUID-named partials qualify; never follow directory/file symlinks.
+// Returns a deletion count; missing, disconnected or locked paths are harmless.
+async function cleanupOrphanedTempFiles(outputDirectories, { io = fs } = {}) {
+  const roots = Array.isArray(outputDirectories) ? outputDirectories : [outputDirectories];
+  const visited = new Set();
+  let removed = 0;
+  const walk = async directory => {
+    if (!directory || !path.isAbsolute(directory)) return;
+    const normalized = path.resolve(directory);
+    if (visited.has(normalized)) return;
+    visited.add(normalized);
+    try {
+      const stat = await io.lstat(normalized);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) return;
+      const entries = await io.readdir(normalized, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isSymbolicLink()) continue;
+        const file = path.join(normalized, entry.name);
+        if (entry.isDirectory()) { await walk(file); continue; }
+        if (!entry.isFile() || !/^\..+\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.partial\.mkv$/i.test(entry.name)) continue;
+        try {
+          const current = await io.lstat(file);
+          if (current.isFile() && !current.isSymbolicLink()) { await io.unlink(file); removed++; }
+        } catch { /* A locked or already removed file must not block startup. */ }
+      }
+    } catch { /* Missing/unavailable output directories need no user prompt. */ }
+  };
+  for (const root of roots) await walk(root);
+  return removed;
+}
+module.exports = { preferencesDefaults, validatePreferences, statsDefaults, validateStats, recordJob, loadState, saveState, inspectInOrder, loadQueue, saveQueue, validateQueue, cleanupInterrupted, cleanupOrphanedTempFiles };
