@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('audiority', {
   exportDiagnostics: () => ipcRenderer.invoke('export-diagnostics'),
   themeOperation: action => ipcRenderer.invoke('theme-operation', action),
   addFiles: files => ipcRenderer.invoke('add-files', files.map(file => webUtils.getPathForFile(file))),
+  pickWatchFolder: () => ipcRenderer.invoke('pick-watch-folder'),
   pickOutput: () => ipcRenderer.invoke('pick-output'),
   start: () => ipcRenderer.invoke('start'),
   prioritizeItem: id => ipcRenderer.invoke('prioritize-item', id),

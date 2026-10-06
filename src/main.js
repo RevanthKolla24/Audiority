@@ -18,6 +18,26 @@ const { defaultSettings, validateSettings, resolveProfile } = require('./profile
 const { loadLibrary, saveLibrary, mutateLibrary, emptyLibrary } = require('./profile-library');
 const fs = require('node:fs/promises');
 const { discoverMedia } = require('./imports');
+const { WatchFolder } = require('./watch-folder');
+const watcher = new WatchFolder();
+let watchTimer, watchBusy = false, watchStopping = false, watchWarning = '';
+// Import only when idle; users still review plans and start conversions.
+async function pollWatchFolder() {
+  if (watchStopping || watchBusy || !preferences.watchEnabled || !settings || running || importing || profileBusy || appStateBusy) return;
+  watchBusy = true;
+  try {
+    const folder = preferences.watchFolder;
+    const ready = await watcher.scan(folder, { outputSuffix: preferences.outputSuffix });
+    if (watchStopping || folder !== preferences.watchFolder || !preferences.watchEnabled || running || importing || profileBusy || appStateBusy) return;
+    if (ready.length) await addFiles(ready);
+    watcher.mark([...items.values()].map(item => item.file));
+    watchWarning = '';
+  } catch (error) {
+    if (!watchStopping && error.message !== watchWarning) {
+      watchWarning = error.message; send('queue-warning', { message: `Watch folder: ${error.message}` });
+    }
+  } finally { watchBusy = false; }
+}
 const { builtins, tokenNames, loadThemes, saveThemes, mutateThemes, validateTheme } = require('./themes');
 const { preferencesDefaults, validatePreferences, statsDefaults, validateStats, recordJob, loadState, saveState, inspectInOrder, loadQueue, saveQueue, cleanupInterrupted } = require('./app-state');
 let preferences = preferencesDefaults(), stats = statsDefaults(), preferencesWarning = '', statsWarning = '', appStateBusy = false;
@@ -163,12 +183,17 @@ app.whenReady().then(async () => {
     if (!selection.canceled) await addFiles(selection.filePaths);
   });
   handle('cancel-import', () => importController?.abort());
+  handle('pick-watch-folder', async () => {
+    const selection = await dialog.showOpenDialog(window, { properties: ['openDirectory'], title: 'Choose watch folder' });
+    return selection.canceled ? '' : selection.filePaths[0];
+  });
   handle('get-app-settings', () => ({ preferences, warning: preferencesWarning, outputDirectory, version: app.getVersion() }));
   handle('save-app-settings', async value => {
     if (running || importing || profileBusy || appStateBusy) throw new Error('Wait for the current operation to finish before saving settings.');
     appStateBusy = true;
     try {
       const next = validatePreferences({ ...value, outputDirectory });
+      if (next.watchFolder !== preferences.watchFolder || next.watchEnabled !== preferences.watchEnabled || next.outputSuffix !== preferences.outputSuffix) watcher.reset();
       preferences = await saveState(app.getPath('userData'), 'app-settings.json', next, validatePreferences);
       preferencesWarning = '';
       engine.setPreferences(preferences);
@@ -333,14 +358,16 @@ app.whenReady().then(async () => {
     } finally { resumeQueue(); if (sleepBlocker !== null) powerSaveBlocker.stop(sleepBlocker); await persistQueue(); running = false; controller = null; send('running', { value: false }); }
   });
   window.loadFile(page);
+  watchTimer = setInterval(() => { void pollWatchFolder(); }, 30000);
 });
 let queueQuitReady = false;
 app.on('before-quit', event => {
   if (queueQuitReady) return;
   event.preventDefault();
+  watchStopping = true; clearInterval(watchTimer);
   cancelQueue(); importController?.abort();
   (async () => {
-    while (running || importing) await new Promise(resolve => setTimeout(resolve, 50));
+    while (running || importing || watchBusy) await new Promise(resolve => setTimeout(resolve, 50));
     await queueWrites; queueQuitReady = true; app.quit();
   })();
 });

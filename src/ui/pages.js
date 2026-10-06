@@ -13,6 +13,8 @@ function applyPreferences(value) {
 // Fill preferences: receives data. See the return statements below for the result; async results are Promises.
 function fillPreferences(data) {
   preferencesData = data;
+  $('pref-watchEnabled').checked = data.preferences.watchEnabled;
+  $('settings-watch-folder').textContent = data.preferences.watchFolder || 'No watch folder selected';
   $('pref-allowedLanguages').value = (data.preferences.allowedLanguages || []).join(', ');
   for (const key of preferenceBooleans) $(`pref-${key}`).checked = data.preferences[key];
   for (const key of ['threads', 'inspectionConcurrency', 'outputSuffix']) $(`pref-${key}`).value = data.preferences[key];
@@ -56,6 +58,7 @@ for (const name of ['queue', 'settings', 'statistics']) $(`nav-${name}`).addEven
 }));
 $('app-settings-form').addEventListener('submit', event => { event.preventDefault(); safe(async () => {
   const value = { ...preferencesData.preferences };
+  value.watchEnabled = $('pref-watchEnabled').checked;
   for (const key of preferenceBooleans) value[key] = $(`pref-${key}`).checked;
   for (const key of ['threads', 'inspectionConcurrency']) value[key] = Number($(`pref-${key}`).value);
   value.allowedLanguages = $('pref-allowedLanguages').value.split(',').map(s => s.trim()).filter(Boolean);
@@ -65,6 +68,10 @@ $('app-settings-form').addEventListener('submit', event => { event.preventDefaul
   finally { $('settings-save').disabled = false; }
 }); });
 $('settings-pick-output').addEventListener('click', () => safe(chooseOutputFolder));
+$('settings-pick-watch').addEventListener('click', () => safe(async () => {
+  const folder = await api.pickWatchFolder();
+  if (folder) { preferencesData.preferences.watchFolder = folder; $('settings-watch-folder').textContent = folder; }
+}));
 $('settings-edit-profile').addEventListener('click', () => safe(async () => { if (!savedSettings) throw new Error('Create a playback profile first.'); showPage('queue'); openSetup(); }));
 $('settings-diagnostics').addEventListener('click', () => safe(() => api.exportDiagnostics()));
 const gb = bytes => `${(bytes / 1e9).toFixed(2)} GB`;

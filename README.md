@@ -1,5 +1,18 @@
 # Audiority
 
+### Watch folders
+
+Settings → Automation lets you choose a folder and enable MKV imports. Save
+settings to apply. The app polls recursively every 30 seconds while idle and
+requires two matching size/modification-time observations. A stalled download
+can still appear stable: this is not a guarantee that copying has finished.
+Generated outputs and symbolic links are skipped. Successfully queued paths are
+remembered for the session, even after clearing the queue; failures can retry.
+Restarting or changing watch settings resets that memory. Existing queue entries
+remain deduplicated. Imports use the active profile and the usual inspection
+pipeline. Conversions are **not automatically started**. Watching only runs while
+the app is open, and a configured playback profile is required.
+
 ### Auto-trash originals (optional)
 
 Settings → Processing offers **Move originals to Trash after successful conversion**.

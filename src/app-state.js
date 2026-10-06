@@ -9,11 +9,16 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
-const preferencesDefaults = () => ({ version: 1, trashOriginals: false, allowedLanguages: [], keepDefaultTrack: true, keepOriginal: false, normalizeVolume: false, clearCompletedOnRestart: false, rememberOutput: true, outputDirectory: '', preserveFolders: true, outputSuffix: '.audiority', threads: 0, inspectionConcurrency: 2, preventSleep: true, compact: false, reducedMotion: false, statsEnabled: true, storeFilenames: false });
+const preferencesDefaults = () => ({ version: 1, watchFolder: "", watchEnabled: false, trashOriginals: false, allowedLanguages: [], keepDefaultTrack: true, keepOriginal: false, normalizeVolume: false, clearCompletedOnRestart: false, rememberOutput: true, outputDirectory: '', preserveFolders: true, outputSuffix: '.audiority', threads: 0, inspectionConcurrency: 2, preventSleep: true, compact: false, reducedMotion: false, statsEnabled: true, storeFilenames: false });
 // Validate preferences: receives value. Returns checked data or throws; do not trust saved/input JSON blindly.
 function validatePreferences(value) {
   if (!value || value.version !== 1) throw new Error('Invalid application settings.');
   const result = { clearCompletedOnRestart: false, ...preferencesDefaults(), ...value };
+  result.watchFolder = value.watchFolder ?? '';
+  result.watchEnabled = value.watchEnabled ?? false;
+  if (typeof result.watchEnabled !== 'boolean') throw new Error('Invalid watchEnabled.');
+  if (typeof result.watchFolder !== 'string' || result.watchFolder.length > 4096 || (result.watchFolder && !path.isAbsolute(result.watchFolder))) throw new Error('Invalid watch folder.');
+  if (result.watchEnabled && !result.watchFolder) throw new Error('Choose a watch folder before enabling automation.');
   result.allowedLanguages = require('./profiles').validateLanguages(value.allowedLanguages ?? []);
   result.keepDefaultTrack = value.keepDefaultTrack ?? true;
   if (typeof result.keepDefaultTrack !== 'boolean') throw new Error('Invalid keepDefaultTrack.');
