@@ -209,6 +209,17 @@ app.on('browser-window-created', (_event, window) => {
       // Hold the active conversion briefly so pause/resume IPC tests are deterministic,
       // even when the real FFmpeg fixture finishes in a fraction of a second.
       const { Engine } = require('../src/engine');
+      // Never send fixture files to the real OS Trash during automated tests.
+      const { shell } = require('electron');
+      const originalTrashItem = shell.trashItem;
+      const trashedSources = [];
+      shell.trashItem = async file => { trashedSources.push(file); };
+      await execute(`$('nav-settings').click()`);
+      await waitFor(`!$('settings-page').hidden`);
+      assert.equal(await execute(`$('pref-trashOriginals').checked`), false);
+      await execute(`$('pref-trashOriginals').checked = true; $('app-settings-form').requestSubmit()`);
+      await waitFor(`$('settings-result').textContent === 'Settings saved.' && !$('settings-save').disabled`);
+      assert.equal(JSON.parse(fs.readFileSync(path.join(userData, 'app-settings.json'), 'utf8')).trashOriginals, true);
       const originalConvert = Engine.prototype.convert;
       let releaseConversion;
       const conversionGate = new Promise(resolve => { releaseConversion = resolve; });
@@ -229,6 +240,9 @@ app.on('browser-window-created', (_event, window) => {
       await waitFor(`[...items.values()].some(item => item.status === 'Complete')`);
       // A paused final job must finish the run without requiring Resume or Cancel.
       await waitFor(`!running && !queuePaused && $('pause').hidden`);
+      assert.equal(trashedSources.length, 1);
+      assert.ok(fs.existsSync(trashedSources[0]));
+      shell.trashItem = originalTrashItem;
       await execute(`window.audiority.pause()`);
       assert.equal(await execute(`queuePaused`), false);
       await execute(`window.audiority.start()`);

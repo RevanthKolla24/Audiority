@@ -1,5 +1,16 @@
 # Audiority
 
+### Auto-trash originals (optional)
+
+Settings → Processing offers **Move originals to Trash after successful conversion**.
+It defaults off and uses the operating system Trash/Recycle Bin, never permanent
+deletion. Only source media is moved, after conversion, verification and output
+publication succeed. External subtitle sources stay untouched. Canceled jobs and
+failed sidecar copies retain the original. OS failures become card warnings and do
+not invalidate the completed output. A verified output path is saved before the
+Trash operation for restart recovery. This may remove your only lossless copy if
+compatibility tracks are disabled; test playback and maintain backups first.
+
 ### Queue pausing
 
 Use **Pause** beside Cancel queue to stop the queue from starting its next job.

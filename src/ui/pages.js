@@ -4,7 +4,7 @@
  * Learning note: async functions return Promises; await gets their result and try/catch handles failure.
  */
 let currentPage = 'queue', preferencesData;
-const preferenceBooleans = ['keepDefaultTrack', 'keepOriginal', 'normalizeVolume', 'clearCompletedOnRestart', 'rememberOutput', 'preserveFolders', 'preventSleep', 'compact', 'reducedMotion', 'statsEnabled', 'storeFilenames'];
+const preferenceBooleans = ['trashOriginals', 'keepDefaultTrack', 'keepOriginal', 'normalizeVolume', 'clearCompletedOnRestart', 'rememberOutput', 'preserveFolders', 'preventSleep', 'compact', 'reducedMotion', 'statsEnabled', 'storeFilenames'];
 // Apply preferences: receives value. Updates state or visible controls; callers use the side effect.
 function applyPreferences(value) {
   document.documentElement.classList.toggle('compact', value.compact);

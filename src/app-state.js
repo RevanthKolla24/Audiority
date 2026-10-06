@@ -9,7 +9,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
-const preferencesDefaults = () => ({ version: 1, allowedLanguages: [], keepDefaultTrack: true, keepOriginal: false, normalizeVolume: false, clearCompletedOnRestart: false, rememberOutput: true, outputDirectory: '', preserveFolders: true, outputSuffix: '.audiority', threads: 0, inspectionConcurrency: 2, preventSleep: true, compact: false, reducedMotion: false, statsEnabled: true, storeFilenames: false });
+const preferencesDefaults = () => ({ version: 1, trashOriginals: false, allowedLanguages: [], keepDefaultTrack: true, keepOriginal: false, normalizeVolume: false, clearCompletedOnRestart: false, rememberOutput: true, outputDirectory: '', preserveFolders: true, outputSuffix: '.audiority', threads: 0, inspectionConcurrency: 2, preventSleep: true, compact: false, reducedMotion: false, statsEnabled: true, storeFilenames: false });
 // Validate preferences: receives value. Returns checked data or throws; do not trust saved/input JSON blindly.
 function validatePreferences(value) {
   if (!value || value.version !== 1) throw new Error('Invalid application settings.');
@@ -22,7 +22,7 @@ function validatePreferences(value) {
   if (typeof result.keepOriginal !== 'boolean') throw new Error('Invalid keepOriginal.');
   if (typeof result.normalizeVolume !== 'boolean') throw new Error('Invalid normalizeVolume.');
   if (typeof result.clearCompletedOnRestart !== 'boolean') throw new Error('Invalid queue preference.');
-  for (const key of ['rememberOutput', 'preserveFolders', 'preventSleep', 'compact', 'reducedMotion', 'statsEnabled', 'storeFilenames']) if (typeof result[key] !== 'boolean') throw new Error(`Invalid ${key}.`);
+  for (const key of ['trashOriginals', 'rememberOutput', 'preserveFolders', 'preventSleep', 'compact', 'reducedMotion', 'statsEnabled', 'storeFilenames']) if (typeof result[key] !== 'boolean') throw new Error(`Invalid ${key}.`);
   if (typeof result.outputDirectory !== 'string' || result.outputDirectory.length > 4096 || (result.outputDirectory && !path.isAbsolute(result.outputDirectory))) throw new Error('Invalid output folder.');
   if (typeof result.outputSuffix !== 'string' || !/^\.[a-zA-Z0-9_-]{1,32}$/.test(result.outputSuffix)) throw new Error('Output suffix must start with a dot and contain 1–32 letters, digits, hyphens or underscores.');
   if (!Number.isInteger(result.threads) || result.threads < 0 || result.threads > 16) throw new Error('Invalid encoder thread limit.');

@@ -11,6 +11,7 @@ const crypto = require('node:crypto');
 const { pathToFileURL } = require('node:url');
 const { Engine } = require('./engine');
 const { nextQueueItem } = require('./queue-priority');
+const { trashOriginal } = require('./trash-original');
 const { toolPaths } = require('./tools');
 const { receivers, devices } = require('./catalog');
 const { defaultSettings, validateSettings, resolveProfile } = require('./profiles');
@@ -132,8 +133,8 @@ app.whenReady().then(async () => {
       publishItem(item);
     } catch (error) {
       let completed = false;
-      if (saved.status === 'Complete' && saved.output) { try { await fs.access(saved.output); completed = true; } catch {} }
-      items.set(saved.id, { ...saved, name: path.basename(saved.file), size: 0, duration: 0, output: completed ? saved.output : '', temporaryOutput: '', status: completed ? 'Complete' : 'Error', error: completed ? '' : `Recovery: ${error.message}`, plan: { tracks: [], warnings: ['Source unavailable; re-import before converting again.'], needsConversion: false } });
+      if (saved.output) { try { const output = await fs.lstat(saved.output); completed = output.isFile() && !output.isSymbolicLink() && output.size > 0; } catch {} }
+      items.set(saved.id, { ...saved, name: path.basename(saved.file), size: 0, duration: 0, output: completed ? saved.output : '', temporaryOutput: '', status: completed ? 'Complete' : 'Error', error: completed ? '' : `Recovery: ${error.message}`, plan: { tracks: [], warnings: [completed ? 'Original source unavailable (it may have been moved to Trash); completed output is retained.' : 'Source unavailable; re-import before converting again.'], needsConversion: false } });
     }
   }
   if (!recovered.warning) await persistQueue();
@@ -318,6 +319,13 @@ app.whenReady().then(async () => {
         try {
           const result = await engine.convert(item, outputDirectory, { signal: controller.signal, preferences, onTemporaryOutput: async temp => { item.temporaryOutput = temp; await persistQueue(true); }, onProgress: progress => { if (progress < 0.99 && Date.now() - lastProgressAt < 150) return; lastProgressAt = Date.now(); send('status', { id: item.id, status: progress >= 0.99 && progress < 1 ? 'Verifying' : 'Converting', progress }); } });
           item.output = result.output;
+          // Persist the verified output before an optional source move, so a crash during
+          // Trash cannot make recovery lose the successfully published destination.
+          await persistQueue(true);
+          result.warnings.push(...await trashOriginal(item, result, {
+            enabled: preferences.trashOriginals, signal: controller.signal,
+            trashItem: file => shell.trashItem(file)
+          }));
           send('status', { id: item.id, status: 'Complete', progress: 1, output: result.output, warnings: result.warnings });
           await record('completed', item, started, result.outputBytes);
         } catch (error) { send('status', { id: item.id, status: controller.signal.aborted ? 'Cancelled' : 'Error', error: error.message }); await record(controller.signal.aborted ? 'cancelled' : 'failed', item, started); }
