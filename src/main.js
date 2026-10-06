@@ -306,10 +306,12 @@ app.whenReady().then(async () => {
     try {
       const attempted = new Set();
       while (true) {
-        if (isQueuePaused) await queuePausePromise;
         if (controller.signal.aborted) break;
         const item = nextQueueItem(items, attempted);
         if (!item) break;
+        // No work means completion, even if Pause was clicked during the final job.
+        // After waking, rescan: priorities may have changed while we were waiting.
+        if (isQueuePaused) { await queuePausePromise; continue; }
         attempted.add(item.id);
         send('status', { id: item.id, status: 'Converting', progress: 0, error: '' });
         const started = performance.now(); let lastProgressAt = 0;

@@ -227,10 +227,7 @@ app.on('browser-window-created', (_event, window) => {
       releaseConversion();
       Engine.prototype.convert = originalConvert;
       await waitFor(`[...items.values()].some(item => item.status === 'Complete')`);
-      await new Promise(resolve => setTimeout(resolve, 100));
-      assert.equal(await execute(`running && queuePaused`), true);
-      // Cancel while the runner waits between jobs must wake it immediately.
-      await execute(`$('cancel').click()`);
+      // A paused final job must finish the run without requiring Resume or Cancel.
       await waitFor(`!running && !queuePaused && $('pause').hidden`);
       await execute(`window.audiority.pause()`);
       assert.equal(await execute(`queuePaused`), false);

@@ -7,8 +7,9 @@ The active conversion, verification, publication and statistics recording finish
 normally; pausing does not suspend FFmpeg midway through an output. **Resume**
 continues with the next eligible job, respecting updated priorities. Canceling or
 quitting wakes a paused queue so shutdown cannot get stuck waiting for Resume.
-Pause state resets when a run ends and is not persisted across restarts. If paused
-during the final job, the runner waits until Resume or Cancel before ending the run.
+Pause state resets when a run ends and is not persisted across restarts. Pausing
+during the final job does not prevent completion: the run ends automatically when
+no eligible work remains. Resume rescans priorities before selecting the next job.
 
 ### Language filtering
 
