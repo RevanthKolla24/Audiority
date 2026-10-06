@@ -13,6 +13,10 @@ const { sourceFormat } = require('./profiles');
 const os = require('node:os');
 const { resolveOutputDirectory } = require('./imports');
 const { validatePreferences, preferencesDefaults } = require('./app-state');
+// A title is a hint only for retained embedded subtitles, never audio or fonts.
+function needsForcedSubtitleFlag(stream) {
+  return stream.codec_type === 'subtitle' && /\bforced\b/i.test(stream.tags?.title || '') && stream.disposition?.forced !== 1;
+}
 // COPYFILE_EXCL refuses existing destinations but is not atomic publication:
 // the final pathname is visible while copying. Never unlink on copy failure;
 // Node handles its failed copy, and the pathname may belong to someone else.
@@ -189,6 +193,11 @@ class Engine {
       // tags/dispositions. Subtitle packet hashes additionally check the actual text/events.
       const args = ['-v', 'error', '-select_streams', String(source.index), '-show_streams', '-show_data_hash', 'sha256', '-show_entries', 'stream=codec_name,extradata_hash:stream_tags=language,title,filename,mimetype:stream_disposition=default,forced'];
       if (source.codec_type === 'subtitle') args.push('-show_packets', '-show_entries', 'stream=codec_name,extradata_hash:stream_tags=language,title,filename,mimetype:stream_disposition=default,forced:packet=data_hash');
+      // The intentional forced-bit change is checked explicitly by verifyOutput.
+      // Keep hashing default, content, headers, tags and attachment data unchanged.
+      if (needsForcedSubtitleFlag(source)) {
+        for (let i = 0; i < args.length; i++) if (args[i] === '-show_entries') args[i + 1] = args[i + 1].replace('stream_disposition=default,forced', 'stream_disposition=default');
+      }
       args.push('-of', 'json');
       const ordinal = targets.filter(s => s.codec_type === source.codec_type).findIndex(s => s.index === source.index);
       const outputArgs = [...args]; outputArgs[outputArgs.indexOf('-select_streams') + 1] = `${source.codec_type === 'subtitle' ? 's' : 't'}:${ordinal}`;
@@ -251,6 +260,12 @@ class Engine {
     const args = ['-hide_banner', '-nostdin', '-v', 'warning', '-n', '-i', item.file, '-map', '0', '-map_metadata', '0', '-map_chapters', '0', '-c', 'copy'];
     // Negative absolute stream maps remove only selected audio/subtitle streams.
     for (const stream of item.plan.streamsToDrop || []) args.push('-map', `-${stream}`);
+    const retainedSubtitles = item.probe.streams.filter(stream => stream.codec_type === 'subtitle' && !(item.plan.droppedStreams || []).includes(stream.index));
+    retainedSubtitles.forEach((stream, outputIndex) => {
+      // +forced adds one flag without clearing default, hearing_impaired, etc.
+      // s:N is the retained subtitle ordinal, not the input's absolute index.
+      if (needsForcedSubtitleFlag(stream)) args.push(`-disposition:s:${outputIndex}`, '+forced');
+    });
     let addedAudioCount = 0;
     const originalAudio = item.plan.tracks.map(t => item.probe.streams.find(s => s.index === t.index));
     const duplicated = item.plan.tracks.map((track, i) => track.keepOriginal ? i : -1).filter(i => i >= 0);
@@ -368,6 +383,9 @@ function verifyOutput(item, output) {
     const originals = sourceStreams.filter(s => s.codec_type === type);
     const copies = output.streams.filter(s => s.codec_type === type);
     if (originals.length !== copies.length || originals.some((source, i) => copies[i].codec_name !== source.codec_name)) throw new Error('Verification failed: a copied stream changed.');
+    if (type === 'subtitle') for (const [i, source] of originals.entries()) {
+      if (needsForcedSubtitleFlag(source) && copies[i].disposition?.forced !== 1) throw new Error('Verification failed: expected forced subtitle flag is missing.');
+    }
   }
   const outputDuration = Number(output.format?.duration);
   if (item.duration && (!Number.isFinite(outputDuration) || Math.abs(outputDuration - item.duration) > Math.max(1, item.duration * 0.001))) throw new Error('Verification failed: output duration differs from input.');
