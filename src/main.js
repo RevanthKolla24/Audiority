@@ -1,8 +1,16 @@
+/*
+ * main.js
+ * Coordinates Electron in the invisible background process. Talks to the web UI through preload.js. Guide: queue persistence; imports; startup recovery; secure window; IPC handlers; conversion runner; shutdown.
+ * Learning note: async functions return Promises; await gets their result and try/catch handles failure.
+ */
 const { app, BrowserWindow, ipcMain, dialog, shell, powerSaveBlocker } = require('electron');
+// Electron's main process can access the OS; the renderer is a restricted web page.
+// app controls lifecycle, BrowserWindow hosts that page, and ipcMain receives bridge requests.
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { pathToFileURL } = require('node:url');
 const { Engine } = require('./engine');
+const { nextQueueItem } = require('./queue-priority');
 const { toolPaths } = require('./tools');
 const { receivers, devices } = require('./catalog');
 const { defaultSettings, validateSettings, resolveProfile } = require('./profiles');
@@ -18,12 +26,14 @@ const items = new Map();
 let importController, appearance, appearanceWarning = '', appearanceBusy = false;
 const page = path.join(__dirname, 'ui', 'index.html');
 let queueWrites = Promise.resolve();
+// Snapshots recovery fields and returns a serialized write Promise so older saves cannot overtake newer state.
 function persistQueue(required = false) {
-  const snapshot = new Map([...items].map(([id, item]) => [id, structuredClone(Object.fromEntries(['id', 'file', 'status', 'output', 'temporaryOutput', 'relativeDirectory', 'sidecars', 'importWarnings', 'error'].map(key => [key, item[key]])))]));
+  const snapshot = new Map([...items].map(([id, item]) => [id, structuredClone(Object.fromEntries(['id', 'file', 'status', 'output', 'temporaryOutput', 'relativeDirectory', 'sidecars', 'importWarnings', 'error', 'priority'].map(key => [key, item[key]])))]));
   const write = queueWrites.then(() => saveQueue(app.getPath('userData'), snapshot));
   queueWrites = write.catch(error => send('queue-warning', { message: `Queue could not be saved: ${error.message}` }));
   return required ? write : queueWrites;
 }
+// Send: receives type, data. See the return statements below for the result; async results are Promises.
 function send(type, data) {
   if (type === 'status' && items.has(data.id)) {
     const item = items.get(data.id); const changed = item.status !== data.status;
@@ -32,12 +42,14 @@ function send(type, data) {
   }
   if (window && !window.isDestroyed()) window.webContents.send('update', { type, ...data });
 }
+// Handle: receives channel, handler. See the return statements below for the result; async results are Promises.
 function handle(channel, handler) {
   ipcMain.handle(channel, async (event, ...args) => {
     if (event.sender !== window.webContents || event.senderFrame?.url !== pathToFileURL(page).href) throw new Error('Untrusted request');
     return handler(...args);
   });
 }
+// Add files: receives paths. See the return statements below for the result; async results are Promises.
 async function addFiles(paths) {
   if (running || importing || profileBusy || appStateBusy) throw new Error('Wait for the current operation to finish before importing.');
   if (!settings) throw new Error('Complete playback setup before importing files.');
@@ -72,9 +84,10 @@ async function addFiles(paths) {
     importing = false; importController = null; send('importing', { value: false });
   }
 }
+// Publish item: receives item, id = item.id. See the return statements below for the result; async results are Promises.
 function publishItem(item, id = item.id) {
     item.status = item.output ? 'Complete' : ['Error', 'Cancelled'].includes(item.status) ? item.status : item.plan.needsConversion ? 'Ready' : item.plan.unresolved ? 'Needs attention' : 'Unchanged';
-    send('item', { item: { id, name: item.name, relativeDirectory: item.relativeDirectory, subtitleInfo: item.subtitleInfo, sidecarCount: item.sidecars?.length || 0, size: item.size, duration: item.duration, tracks: item.plan.tracks, warnings: [...item.plan.warnings, ...(item.importWarnings || [])], status: item.status, error: item.error || '', output: item.output || '' } });
+    send('item', { item: { id, priority: item.priority, name: item.name, relativeDirectory: item.relativeDirectory, subtitleInfo: item.subtitleInfo, sidecarCount: item.sidecars?.length || 0, size: item.size, duration: item.duration, tracks: item.plan.tracks, warnings: [...item.plan.warnings, ...(item.importWarnings || [])], status: item.status, error: item.error || '', output: item.output || '' } });
 }
 
 app.whenReady().then(async () => {
@@ -110,6 +123,7 @@ app.whenReady().then(async () => {
     }
   }
   if (!recovered.warning) await persistQueue();
+  // Isolation keeps preload privileges separate; sandbox and no Node integration restrict UI code.
   window = new BrowserWindow({ width: 1240, height: 850, minWidth: 960, minHeight: 680, backgroundColor: '#f5f5f3', title: 'Audiority', webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
@@ -233,6 +247,20 @@ app.whenReady().then(async () => {
   });
   handle('clear', () => { if (running || importing) throw new Error('Queue is busy.'); items.clear(); return persistQueue(true); });
   handle('cancel', () => { controller?.abort(); });
+  handle('prioritize-item', async id => {
+    if (typeof id !== 'string' || !items.has(id)) throw new Error('Unknown queue item.');
+    const item = items.get(id);
+    if (item.status !== 'Ready' || item.output || !item.plan?.needsConversion) throw new Error('Only Ready items can be prioritized.');
+    if (importing || profileBusy || appStateBusy) throw new Error('Wait for import or settings to finish.');
+    // Monotonic even for multiple clicks within the same millisecond.
+    let priority = Date.now();
+    for (const candidate of items.values()) priority = Math.max(priority, (candidate.priority || 0) + 1);
+    if (!Number.isSafeInteger(priority)) throw new Error('Queue priority limit exceeded.');
+    item.priority = priority;
+    publishItem(item);
+    await persistQueue(true);
+    return item.priority;
+  });
   handle('reveal', id => { const item = items.get(id); if (item?.output) shell.showItemInFolder(item.output); });
   handle('start', async () => {
     if (running || profileBusy || appStateBusy) throw new Error('Queue or settings operation is already running.');
@@ -251,9 +279,12 @@ app.whenReady().then(async () => {
       } catch (error) { statsWarning = `Statistics could not be saved: ${error.message}. Conversion results are unaffected.`; send('statistics-changed', {}); }
     };
     try {
-      for (const item of items.values()) {
+      const attempted = new Set();
+      while (true) {
         if (controller.signal.aborted) break;
-        if (item.output || !item.plan.needsConversion) continue;
+        const item = nextQueueItem(items, attempted);
+        if (!item) break;
+        attempted.add(item.id);
         send('status', { id: item.id, status: 'Converting', progress: 0, error: '' });
         const started = performance.now(); let lastProgressAt = 0;
         try {

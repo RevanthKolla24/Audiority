@@ -1,13 +1,21 @@
+/*
+ * profile-library.js
+ * Manages named profiles for main.js. Guide: name/ID validation; edit/switch/delete actions; atomic saving; backup recovery and legacy migration.
+ * Learning note: async functions return Promises; await gets their result and try/catch handles failure.
+ */
 const fs = require('node:fs/promises');
+// Write a complete temporary JSON file before renaming it, so interrupted writes do not truncate live settings.
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { validateSettings } = require('./profiles');
 const { loadSettings } = require('./settings');
 const emptyLibrary = () => ({ version: 2, activeId: null, profiles: [] });
+// Validate name: receives name. Returns checked data or throws; do not trust saved/input JSON blindly.
 function validateName(name) {
   if (typeof name !== 'string' || !name.trim() || name.trim().length > 100) throw new Error('Use a profile name of 1–100 characters.');
   return name.trim();
 }
+// Validate library: receives value. Returns checked data or throws; do not trust saved/input JSON blindly.
 function validateLibrary(value) {
   if (!value || value.version !== 2 || !Array.isArray(value.profiles)) throw new Error('Invalid profile library.');
   const ids = new Set();
@@ -19,6 +27,7 @@ function validateLibrary(value) {
   if ((value.activeId !== null && !ids.has(value.activeId)) || (profiles.length && value.activeId === null)) throw new Error('Invalid active profile.');
   return { version: 2, activeId: value.activeId, profiles };
 }
+// Mutate library: receives library, action. See the return statements below for the result; async results are Promises.
 function mutateLibrary(library, action) {
   const next = structuredClone(validateLibrary(library));
   const find = id => { const p = next.profiles.find(p => p.id === id); if (!p) throw new Error('Profile not found.'); return p; };
@@ -38,6 +47,7 @@ function mutateLibrary(library, action) {
   } else throw new Error('Unknown profile operation.');
   return validateLibrary(next);
 }
+// Save library: receives directory, library. Completes after validated data has been written; failures reject the Promise.
 async function saveLibrary(directory, library) {
   const validated = validateLibrary(library);
   await fs.mkdir(directory, { recursive: true });
@@ -52,6 +62,7 @@ async function saveLibrary(directory, library) {
   } finally { await fs.unlink(temp).catch(() => {}); }
   return validated;
 }
+// Load library: receives directory. Returns loaded state plus recovery/default information.
 async function loadLibrary(directory) {
   try { return { library: validateLibrary(JSON.parse(await fs.readFile(path.join(directory, 'playback-profiles.json'), 'utf8'))), warning: '' }; }
   catch (error) {

@@ -1,18 +1,27 @@
+/*
+ * imports.js
+ * Discovers media and matching subtitle sidecars for main.js. Engine.js also uses its safe output-path helpers. Guide: path boundaries; subtitle index; recursive discovery; output directories.
+ * Learning note: async functions return Promises; await gets their result and try/catch handles failure.
+ */
 const fs = require('node:fs/promises');
+// lstat describes a link itself; stat follows it. Checking links helps avoid loops/path escapes.
 const path = require('node:path');
 
 const mediaExtensions = new Set('.mkv .mp4 .m4v .mov .avi .webm .ts .mts .m2ts .mpg .mpeg .vob .ogv .wmv .flv .mxf .flac .wav .wave .mp3 .aac .m4a .ogg .opus .aiff .aif .ac3 .eac3 .dts .mka .wma .ape .alac'.split(' '));
 const subtitleExtensions = new Set(['.ass', '.ssa', '.srt']);
 const key = file => process.platform === 'win32' ? file.toLowerCase() : file;
+// Is inside: receives parent, file. Returns the calculated value for the caller.
 function isInside(parent, file) {
   const relative = path.relative(parent, file);
   return !path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`);
 }
+// Output relative directory: receives root, directory. See the return statements below for the result; async results are Promises.
 function outputRelativeDirectory(root, directory) {
   const result = path.join(path.basename(root), path.relative(root, directory));
   if (path.isAbsolute(result) || result.split(path.sep).some(p => p === '..')) throw new Error('Unsafe relative folder.');
   return result;
 }
+// Match sidecars: receives file, entries, index = null. See the return statements below for the result; async results are Promises.
 function matchSidecars(file, entries, index = null) {
   const stem = path.parse(file).name;
   if (index) return index.get(stem) || { sidecars: [], warnings: [] };
@@ -29,6 +38,7 @@ function matchSidecars(file, entries, index = null) {
   if (entries.some(e => (e.isDirectory() && /^(fonts?|attachments)$/i.test(e.name)) || (e.isFile() && /\.(ttf|otf|ttc)$/i.test(e.name)))) warnings.push('External fonts found. They are not auto-attached or copied; ASS playback may need those fonts installed.');
   return { sidecars, warnings };
 }
+// Index sidecars: receives directory, entries. See the return statements below for the result; async results are Promises.
 function indexSidecars(directory, entries) {
   const stems = new Map();
   const fonts = entries.some(e => (e.isDirectory() && /^(fonts?|attachments)$/i.test(e.name)) || (e.isFile() && /\.(ttf|otf|ttc)$/i.test(e.name)));
@@ -51,6 +61,7 @@ function indexSidecars(directory, entries) {
   }
   return stems;
 }
+// Discover media: receives paths, { outputDirectory = '', outputSuffix = '.audiority', signal, onProgress = (. See the return statements below for the result; async results are Promises.
 async function* discoverMedia(paths, { outputDirectory = '', outputSuffix = '.audiority', signal, onProgress = () => {}, onWarning = () => {} } = {}) {
   const seen = new Set();
   let visited = 0, found = 0, skipped = 0;
@@ -59,6 +70,7 @@ async function* discoverMedia(paths, { outputDirectory = '', outputSuffix = '.au
   const escapedSuffix = outputSuffix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const outputPattern = new RegExp(`${escapedSuffix}(?: \\(\\d+\\))?\\.mkv$`, 'i');
   const generated = file => outputPattern.test(file) || /\.audiority(?: \(\d+\))?\.mkv$/i.test(file) || /\.partial\.mkv$/i.test(file);
+  // Visit: receives file, root, explicit = false, siblings = null, sidecarIndex = null. See the return statements below for the result; async results are Promises.
   async function* visit(file, root, explicit = false, siblings = null, sidecarIndex = null) {
     cancelled(); visited++; progress();
     let stat;
@@ -97,6 +109,7 @@ async function* discoverMedia(paths, { outputDirectory = '', outputSuffix = '.au
   for (const file of paths) yield* visit(path.resolve(file), '', true);
   progress();
 }
+// Resolve output directory: receives base, relative = ''. See the return statements below for the result; async results are Promises.
 async function resolveOutputDirectory(base, relative = '') {
   if (typeof relative !== 'string' || path.isAbsolute(relative) || relative.split(/[\\/]/).some(p => p === '..')) throw new Error('Unsafe output folder path.');
   const root = await fs.realpath(base);

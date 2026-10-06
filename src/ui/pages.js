@@ -1,9 +1,16 @@
+/*
+ * ui/pages.js
+ * Renderer-side Settings and Statistics pages. Shares renderer helpers and asks the backend to save validated data. Guide: preferences; palette previews; page navigation; statistics; events.
+ * Learning note: async functions return Promises; await gets their result and try/catch handles failure.
+ */
 let currentPage = 'queue', preferencesData;
 const preferenceBooleans = ['keepOriginal', 'normalizeVolume', 'clearCompletedOnRestart', 'rememberOutput', 'preserveFolders', 'preventSleep', 'compact', 'reducedMotion', 'statsEnabled', 'storeFilenames'];
+// Apply preferences: receives value. Updates state or visible controls; callers use the side effect.
 function applyPreferences(value) {
   document.documentElement.classList.toggle('compact', value.compact);
   document.documentElement.classList.toggle('reduced-motion', value.reducedMotion);
 }
+// Fill preferences: receives data. See the return statements below for the result; async results are Promises.
 function fillPreferences(data) {
   preferencesData = data;
   for (const key of preferenceBooleans) $(`pref-${key}`).checked = data.preferences[key];
@@ -14,6 +21,7 @@ function fillPreferences(data) {
   output = data.outputDirectory || ''; syncOutputFolder();
   renderPresetThemes();
 }
+// Render preset themes: receives no explicit arguments (uses current state). Updates state or visible controls; callers use the side effect.
 function renderPresetThemes() {
   if (!appearanceData) return;
   const parent = $('theme-presets'); parent.replaceChildren();
@@ -29,6 +37,7 @@ function renderPresetThemes() {
     }
   }
 }
+// Show page: receives page. Updates state or visible controls; callers use the side effect.
 function showPage(page) {
   currentPage = page;
   $('settings-page').hidden = page !== 'settings'; $('statistics-page').hidden = page !== 'statistics';
@@ -57,6 +66,7 @@ $('settings-pick-output').addEventListener('click', () => safe(chooseOutputFolde
 $('settings-edit-profile').addEventListener('click', () => safe(async () => { if (!savedSettings) throw new Error('Create a playback profile first.'); showPage('queue'); openSetup(); }));
 $('settings-diagnostics').addEventListener('click', () => safe(() => api.exportDiagnostics()));
 const gb = bytes => `${(bytes / 1e9).toFixed(2)} GB`;
+// Render statistics: receives { stats, warning, enabled }. Updates state or visible controls; callers use the side effect.
 function renderStatistics({ stats, warning, enabled }) {
   $('stats-note').textContent = `${enabled ? 'Local recording enabled' : 'Recording paused'} · Since ${new Date(stats.since).toLocaleDateString()}. Source GB means full source files producing verified outputs, not audio bytes encoded. GB is decimal. History starts with this feature; repeat exports count as separate jobs. ${warning || ''}`;
   const t = stats.totals; const cards = $('stats-cards'); cards.replaceChildren();

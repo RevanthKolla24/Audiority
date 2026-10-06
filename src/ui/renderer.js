@@ -1,27 +1,40 @@
+/*
+ * ui/renderer.js
+ * Renderer-side queue workspace with no Node.js access. Uses window.audiority for privileged operations. Guide: DOM helpers; ETA; incremental cards; pagination/actions; backend updates.
+ * Learning note: async functions return Promises; await gets their result and try/catch handles failure.
+ */
 const api = window.audiority;
 const $ = id => document.getElementById(id);
 const items = new Map();
+// Map keeps jobs addressable by ID; the DOM is only a visible projection of this state.
 const expandedTracks = new Set();
 let running = false, importing = false, output = '', queuePage = 0, renderScheduled = false;
 const queuePageSize = 50;
+// Schedule render: receives no explicit arguments (uses current state). See the return statements below for the result; async results are Promises.
 function scheduleRender() { if (renderScheduled) return; renderScheduled = true; requestAnimationFrame(() => { renderScheduled = false; render(); }); }
+// Sync output folder: receives no explicit arguments (uses current state). See the return statements below for the result; async results are Promises.
 function syncOutputFolder() {
   $('destination').textContent = output || 'No folder selected';
   $('folder').title = output || 'Choose output folder';
   $('settings-output').textContent = output || 'No output folder selected';
 }
+// Choose output folder: receives no explicit arguments (uses current state). See the return statements below for the result; async results are Promises.
 async function chooseOutputFolder() {
   const selected = await api.pickOutput();
   if (selected) output = selected;
   syncOutputFolder(); render();
 }
 const label = codec => codec === 'dca' || codec === 'dts' ? 'DTS' : codec === 'ac3' ? 'Dolby Digital' : codec === 'eac3' ? 'Dolby Digital Plus' : codec.startsWith('pcm_') ? 'PCM' : codec.toUpperCase();
+// Element: receives tag, className, text. See the return statements below for the result; async results are Promises.
 function element(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; }
+// Progress value: receives item. Returns the calculated value for the caller.
 function progressValue(item) { return Number.isFinite(item.progress) ? Math.min(1, Math.max(0, item.progress)) : 0; }
+// Remaining text: receives seconds. Returns the calculated value for the caller.
 function remainingText(seconds) {
   const rounded = Math.max(1, Math.ceil(seconds));
   return `${rounded}s`;
 }
+// Progress text: receives item. Returns the calculated value for the caller.
 function progressText(item) {
   if (item.status === 'Complete') return 'Complete';
   if (item.status === 'Verifying') return 'Verifying output...';
@@ -34,10 +47,12 @@ function progressText(item) {
   const remaining = elapsed / value - elapsed;
   return Number.isFinite(remaining) ? `${percent} · ~${remainingText(remaining)} remaining` : `${percent} · Estimating…`;
 }
+// Update progress node: receives wrap, item. Updates state or visible controls; callers use the side effect.
 function updateProgressNode(wrap, item) {
   wrap.querySelector('progress').value = item.status === 'Complete' ? 1 : progressValue(item);
   wrap.querySelector('.progress-text').textContent = progressText(item);
 }
+// Create progress: receives item. See the return statements below for the result; async results are Promises.
 function createProgress(item) {
   if (item.status === 'Converting' && !item.progressStart && progressValue(item) > 0) item.progressStart = Date.now();
   const wrap = element('div', 'progress-wrap');
@@ -47,6 +62,7 @@ function createProgress(item) {
   updateProgressNode(wrap, item);
   return wrap;
 }
+// Patch progress: receives update. See the return statements below for the result; async results are Promises.
 function patchProgress(update) {
   const item = items.get(update.id);
   if (!item) return;
@@ -62,12 +78,14 @@ function patchProgress(update) {
   updateProgressNode(wrap, item);
 }
 const cardSnapshots = new WeakMap();
+// Create item card: receives item. See the return statements below for the result; async results are Promises.
 function createItemCard(item) {
     const card = element('article', 'item');
     card.dataset.id = item.id;
     patchCardState(card, item);
     return card;
 }
+// Accepts existing card/job; updates changed regions while retaining the card and expanded details.
 function patchCardState(card, item) {
   const previous = cardSnapshots.get(card) || {};
   const content = JSON.stringify([item.name, item.size, item.duration, item.relativeDirectory, item.subtitleInfo, item.sidecarCount, item.tracks]);
@@ -97,6 +115,19 @@ function patchCardState(card, item) {
   if (status.textContent !== item.status) status.textContent = item.status;
   const statusClass = `status ${item.status.toLowerCase().replaceAll(' ', '-')}`;
   if (status.className !== statusClass) status.className = statusClass;
+  let prioritize = card.querySelector('.prioritize-item');
+  if (item.status === 'Ready' && !item.output) {
+    if (!prioritize) {
+      prioritize = element('button', 'quiet prioritize-item', '↑ Move to Top');
+      prioritize.setAttribute('aria-label', `Move ${item.name} to top of queue`);
+      prioritize.addEventListener('click', () => safe(async () => {
+        prioritize.disabled = true;
+        try { await api.prioritizeItem(item.id); queuePage = 0; render(); }
+        finally { prioritize.disabled = false; }
+      }));
+    }
+    if (prioritize.parentNode !== card.querySelector('.item-head')) card.querySelector('.item-head').append(prioritize);
+  } else prioritize?.remove();
   let progress = card.querySelector('.progress-wrap');
   if (item.progress !== undefined || ['Converting', 'Verifying', 'Complete'].includes(item.status)) {
     if (!progress) { progress = createProgress(item); card.append(progress); }
@@ -118,10 +149,11 @@ function patchCardState(card, item) {
   } else if (!item.output && reveal) reveal.remove();
   cardSnapshots.set(card, { content, messages });
 }
+// Reads queue state; patches the visible priority-sorted page and controls without wiping all cards.
 function render() {
   if (typeof currentPage !== 'undefined' && currentPage !== 'queue') return;
   const queue = $('queue');
-  const all = [...items.values()];
+  const all = [...items.values()].sort((a, b) => (b.priority || 0) - (a.priority || 0));
   queuePage = Math.max(0, Math.min(queuePage, Math.ceil(all.length / queuePageSize) - 1));
   const pageItems = all.slice(queuePage * queuePageSize, (queuePage + 1) * queuePageSize);
   const existing = new Map([...queue.children].filter(node => node.dataset.id).map(node => [node.dataset.id, node]));
@@ -165,7 +197,9 @@ function render() {
   if (typeof renderProfiles === 'function') renderProfiles();
   $('summary').textContent = running ? 'Converting locally. You can cancel safely.' : importing ? 'Inspecting audio tracks…' : `${[...items.values()].filter(i => i.status === 'Complete').length} completed · Originals untouched`;
 }
+// Safe: receives action. See the return statements below for the result; async results are Promises.
 async function safe(action) { $('message').textContent = ''; try { await action(); } catch (error) { $('message').textContent = error.message; } }
+// Import files: receives action. See the return statements below for the result; async results are Promises.
 async function importFiles(action) { if (running || importing || $('workspace').hidden) return; importing = true; render(); await safe(action); importing = false; render(); }
 $('drop').addEventListener('click', () => importFiles(() => api.pickFiles()));
 $('import-folder').addEventListener('click', () => importFiles(() => api.pickImportFolder()));

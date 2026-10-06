@@ -1,5 +1,11 @@
 # Audiority
 
+## Queue priority
+
+Click **↑ Move to Top** on a Ready item to prioritize it. Most recently prioritized items appear first on page 1 and are chosen first when the runner selects its next job. The current conversion is never interrupted. Unprioritized jobs keep their insertion order.
+
+Priority is stored in the local queue file and survives recovery. Completed items retain their ordering but are not run again. Error/Cancelled jobs remain eligible for a later queue run, with at most one attempt per job in each run. Only Ready items can receive a new priority; import/settings operations must finish first.
+
 ## Optional compatibility tracks
 
 Enable **Create compatibility track** in Advanced Audio Rules for a profile, or in Settings → Processing globally. Both default to off; either enabled setting retains originals. Old saved settings default to off.

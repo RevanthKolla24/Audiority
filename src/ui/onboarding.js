@@ -1,3 +1,8 @@
+/*
+ * ui/onboarding.js
+ * Renderer-side receiver wizard and profile management. Matrix rows are shortcuts to schema-backed controls. Guide: matrix mapping; search; manual rules; draft read/write; preview; navigation; dialogs.
+ * Learning note: async functions return Promises; await gets their result and try/catch handles failure.
+ */
 // Shares the narrow bridge and UI helpers from renderer.js; no Node access.
 let setupData, savedSettings, draft, selectedReceiver = '', previewVersion = 0, activeOption = -1, editingId = null, managingProfiles = false, dialogAction = null;
 const formatNames = { dts: 'DTS', ac3: 'Dolby Digital (AC-3)', pcm: 'PCM stereo', eac3: 'Dolby Digital Plus', dtshd: 'DTS-HD', truehd: 'Dolby TrueHD' };
@@ -9,6 +14,7 @@ const matrixRows = [
   { id: 'lossless', sources: ['flac', 'alac'], scope: 'surround', actions: ['ac3', 'dts', 'pcm'] },
   { id: 'other', sources: ['aac', 'mp3', 'opus', 'vorbis'], scope: 'any', actions: ['copy', 'ac3', 'dts', 'pcm'] }
 ];
+// Matrix state: receives value, row. See the return statements below for the result; async results are Promises.
 function matrixState(value, row) {
   const rules = value.rules.filter(rule => row.sources.includes(rule.source));
   const excluded = row.sources.filter(source => value.excludedFormats.includes(source));
@@ -21,9 +27,11 @@ function matrixState(value, row) {
       row.id === 'dtshd' && value.extractDtsCore) return 'auto';
   return target;
 }
+// Refresh matrix: receives value. Updates state or visible controls; callers use the side effect.
 function refreshMatrix(value) {
   for (const row of matrixRows) $('matrix-' + row.id).value = matrixState(value, row);
 }
+// Apply matrix: receives row, action. Updates state or visible controls; callers use the side effect.
 function applyMatrix(row, action) {
   // Automatic deliberately leaves the explicit editors unchanged. They are
   // the schema-backed source of truth, so repeated previews never add rules.
@@ -50,11 +58,13 @@ for (const row of matrixRows) {
   selectOptions($('matrix-' + row.id), ['auto', ...row.actions].map(action => [action, names[action]]), 'auto');
   $('matrix-' + row.id).addEventListener('change', event => applyMatrix(row, event.target.value));
 }
+// Select options: receives node, options, value. See the return statements below for the result; async results are Promises.
 function selectOptions(node, options, value) {
   node.replaceChildren();
   for (const [id, text] of options) { const option = element('option', '', text); option.value = id; node.append(option); }
   node.value = value;
 }
+// Checkboxes: receives id, formats, selected. See the return statements below for the result; async results are Promises.
 function checkboxes(id, formats, selected) {
   const parent = $(id); parent.replaceChildren();
   for (const format of formats) {
@@ -62,10 +72,13 @@ function checkboxes(id, formats, selected) {
     label.append(input, document.createTextNode(formatNames[format] || format.toUpperCase())); parent.append(label);
   }
 }
+// Checked: receives id. Returns the calculated value for the caller.
 function checked(id) { return [...$(id).querySelectorAll('input:checked')].map(input => input.value); }
+// Show sources: receives parent, sources. Updates state or visible controls; callers use the side effect.
 function showSources(parent, sources) {
   for (const source of sources || []) parent.append(element('div', 'meta', `Reference: ${source}`));
 }
+// Receiver detail: receives no explicit arguments (uses current state). See the return statements below for the result; async results are Promises.
 function receiverDetail() {
   const receiver = setupData.receivers.find(r => r.id === selectedReceiver);
   const detail = $('avr-detail'); detail.replaceChildren();
@@ -76,6 +89,7 @@ function receiverDetail() {
   $('receiver-next').disabled = !selectedReceiver && !$('advanced-enabled').checked || receiver?.status === 'directory-only' && !$('advanced-enabled').checked;
   $('receiver-help').textContent = receiver?.status === 'directory-only' ? 'This model requires Advanced capability confirmation.' : 'Settings stay on this computer.';
 }
+// Search receivers: receives no explicit arguments (uses current state). See the return statements below for the result; async results are Promises.
 function searchReceivers() {
   const tokens = $('avr-search').value.toLowerCase().split(/\s+/).map(token => token.replace(/[^a-z0-9]/g, '')).filter(Boolean);
   const matches = setupData.receivers.filter(r => {
@@ -91,10 +105,12 @@ function searchReceivers() {
   if (!matches.length) results.append(element('p', 'meta', 'No matching model. Use Custom setup below.'));
   results.hidden = false; $('avr-search').setAttribute('aria-expanded', 'true'); $('avr-search').removeAttribute('aria-activedescendant');
 }
+// Choose receiver: receives receiver. See the return statements below for the result; async results are Promises.
 function chooseReceiver(receiver) {
   selectedReceiver = receiver.id; $('avr-search').value = receiver.name;
   $('avr-results').hidden = true; $('avr-search').setAttribute('aria-expanded', 'false'); $('avr-search').removeAttribute('aria-activedescendant'); receiverDetail();
 }
+// Rule row: receives rule = { source: 'flac', scope: 'surround', target: 'dts' }. See the return statements below for the result; async results are Promises.
 function ruleRow(rule = { source: 'flac', scope: 'surround', target: 'dts' }) {
   const row = element('div', 'rule-row');
   for (const [key, options] of [['source', sourceNames.map(s => [s, formatNames[s] || s.toUpperCase()])], ['scope', [['any', 'All channels'], ['stereo', 'Stereo'], ['surround', 'Mono / surround']]], ['target', [['auto', 'Automatic'], ['copy', 'Keep original'], ...['dts', 'ac3', 'pcm'].map(f => [f, formatNames[f]])]]]) {
@@ -102,6 +118,7 @@ function ruleRow(rule = { source: 'flac', scope: 'surround', target: 'dts' }) {
   }
   const remove = element('button', 'quiet', 'Remove'); remove.addEventListener('click', () => { row.remove(); refreshMatrix(readDraft()); }); row.append(remove); $('rule-list').append(row);
 }
+// Downmix row: receives rule = { source: '7.1', target: '5.1(side. See the return statements below for the result; async results are Promises.
 function downmixRow(rule = { source: '7.1', target: '5.1(side)' }) {
   const row = element('div', 'rule-row');
   for (const [key, values] of [['source', ['7.1', '7.1(wide)', '7.1(wide-side)', '6.1', '6.1(back)', '6.1(front)', '5.1', '5.1(side)']], ['target', ['5.1(side)', '3.1', 'stereo']]]) {
@@ -114,6 +131,7 @@ $('add-downmix').addEventListener('click', () => downmixRow());
 $('matrix-panel').addEventListener('change', event => {
   if (!event.target.id.startsWith('matrix-')) refreshMatrix(readDraft());
 });
+// Accepts settings; fills controls and derives matrix summaries without discarding specific overrides.
 function fillDraft(value) {
   draft = structuredClone(value); selectedReceiver = draft.receiverId;
   $('avr-search').value = setupData.receivers.find(r => r.id === selectedReceiver)?.name || '';
@@ -135,6 +153,7 @@ function fillDraft(value) {
   checkboxes('path-formats', ['ac3', 'dts', 'pcm', 'eac3', 'dtshd', 'truehd'], draft.pathCodecs);
   receiverDetail(); deviceDetail();
 }
+// Reads schema-backed form controls; returns settings preserving manual rules and layout mappings.
 function readDraft() {
   draft.extractDtsCore = $('extract-dts-core').checked;
   draft.allowDownmix = $('allow-downmix').checked;
@@ -144,14 +163,17 @@ function readDraft() {
   draft.downmixRules = [...$('downmix-list').children].map(row => Object.fromEntries([...row.querySelectorAll('select')].map(select => [select.dataset.field, select.value])));
   return { ...draft, receiverId: selectedReceiver, advanced: $('advanced-enabled').checked, allowed: checked('allowed-formats'), preserve: $('preserve-supported').checked, lossless: $('lossless-target').value, lossy: $('lossy-target').value, stereo: $('stereo-target').value, ac3Bitrate: Number($('ac3-bitrate').value), dtsBitrate: Number($('dts-bitrate').value), pcmBits: Number($('pcm-bits').value), pcmRate: Number($('pcm-rate').value), rules: [...$('rule-list').children].map(row => Object.fromEntries([...row.querySelectorAll('select')].map(select => [select.dataset.field, select.value]))), platform: $('media-platform').value, deviceId: $('playback-device').value, player: $('player-app').value, connection: $('audio-connection').value, tv: $('tv-model').value, passthrough: $('passthrough').value, pathConfirmed: $('path-confirmed').checked, pathCodecs: checked('path-formats') };
 }
+// Device detail: receives no explicit arguments (uses current state). See the return statements below for the result; async results are Promises.
 function deviceDetail() {
   const device = setupData.devices.find(d => d.id === $('playback-device').value);
   $('device-detail').replaceChildren(element('strong', '', device.name), element('p', '', device.note)); showSources($('device-detail'), device.sources);
   for (const input of $('path-formats').querySelectorAll('input')) input.disabled = !$('path-confirmed').checked;
 }
+// Profile text: receives profile. Returns the calculated value for the caller.
 function profileText(profile) {
   return `${profile.name} · ${profile.allowed.map(c => formatNames[c]).join(' / ') || 'No safe target enabled'} · PCM ≤ ${profile.pcmBits}-bit / ${profile.pcmRate / 1000} kHz`;
 }
+// Preview profile: receives no explicit arguments (uses current state). See the return statements below for the result; async results are Promises.
 async function previewProfile() {
   const version = ++previewVersion;
   try {
@@ -160,11 +182,13 @@ async function previewProfile() {
     $('setup-save').disabled = false;
   } catch (error) { if (version === previewVersion) { $('profile-preview').textContent = error.message; $('setup-save').disabled = true; } }
 }
+// Show step: receives step. Updates state or visible controls; callers use the side effect.
 function showStep(step) {
   $('receiver-page').hidden = step !== 1; $('playback-page').hidden = step !== 2;
   $('step-one').classList.toggle('active', step === 1); $('step-two').classList.toggle('active', step === 2);
   if (step === 2) { deviceDetail(); previewProfile(); $('media-platform').focus(); } else $('avr-search').focus();
 }
+// Enter workspace: receives profile. See the return statements below for the result; async results are Promises.
 function enterWorkspace(profile) {
   if ($('advanced-rules-dialog').open) $('advanced-rules-dialog').close();
   if (typeof showPage === 'function') showPage('queue');
@@ -179,6 +203,7 @@ function enterWorkspace(profile) {
   $('change-setup').disabled = running || importing || managingProfiles;
   render();
 }
+// Open setup: receives newProfile = false. Updates state or visible controls; callers use the side effect.
 function openSetup(newProfile = false) {
   if ($('advanced-rules-dialog').open) $('advanced-rules-dialog').close();
   if (running || importing || managingProfiles || !setupData) return;
@@ -234,6 +259,7 @@ safe(async () => {
   if (savedSettings) enterWorkspace(setupData.profile); else showStep(1);
 });
 let profileRenderSignature = '';
+// Render profiles: receives no explicit arguments (uses current state). Updates state or visible controls; callers use the side effect.
 function renderProfiles() {
   if (!setupData) return;
   const signature = JSON.stringify([setupData.library, $('profile-search').value, running, importing, managingProfiles, $('setup').hidden]);
@@ -253,6 +279,7 @@ function renderProfiles() {
   $('profile-count').textContent = setupData.library.profiles.length;
   $('new-profile').disabled = running || importing || managingProfiles || !$('setup').hidden;
 }
+// Perform profile: receives action. See the return statements below for the result; async results are Promises.
 async function performProfile(action) {
   if (running || importing || managingProfiles) throw new Error('Wait until the current operation finishes.');
   managingProfiles = true; render(); renderProfiles();
@@ -266,6 +293,7 @@ async function performProfile(action) {
     }
   } finally { managingProfiles = false; render(); renderProfiles(); }
 }
+// Open profile dialog: receives type. Updates state or visible controls; callers use the side effect.
 function openProfileDialog(type) {
   if (running || importing || managingProfiles) return;
   const record = setupData.library.profiles.find(p => p.id === setupData.library.activeId);

@@ -1,8 +1,16 @@
+/*
+ * app-state.js
+ * Stores validated preferences, local statistics and restartable queue records. Main.js calls these background helpers. Guide: defaults; validators; job counting; safe writes; ordered inspection; recovery.
+ * Learning note: async functions return Promises; await gets their result and try/catch handles failure.
+ */
 const fs = require('node:fs/promises');
+// JSON is data, not trusted instructions: validate loaded objects before using paths or counters.
+// Promise-based filesystem calls allow the UI/process event loop to keep handling other work.
 const path = require('node:path');
 const crypto = require('node:crypto');
 
 const preferencesDefaults = () => ({ version: 1, keepOriginal: false, normalizeVolume: false, clearCompletedOnRestart: false, rememberOutput: true, outputDirectory: '', preserveFolders: true, outputSuffix: '.audiority', threads: 0, inspectionConcurrency: 2, preventSleep: true, compact: false, reducedMotion: false, statsEnabled: true, storeFilenames: false });
+// Validate preferences: receives value. Returns checked data or throws; do not trust saved/input JSON blindly.
 function validatePreferences(value) {
   if (!value || value.version !== 1) throw new Error('Invalid application settings.');
   const result = { clearCompletedOnRestart: false, ...preferencesDefaults(), ...value };
@@ -21,6 +29,7 @@ function validatePreferences(value) {
 }
 const counters = () => ({ completed: 0, failed: 0, cancelled: 0, sourceBytes: 0, outputBytes: 0, processingSeconds: 0, mediaSeconds: 0, encoded: 0, extracted: 0, downmixed: 0, copied: 0 });
 const statsDefaults = () => ({ version: 1, since: new Date().toISOString(), totals: counters(), codecs: {}, downmixes: {}, profiles: {}, days: {}, recent: [] });
+// Validate stats: receives value. Returns checked data or throws; do not trust saved/input JSON blindly.
 function validateStats(value) {
   if (!value || value.version !== 1 || !Number.isFinite(Date.parse(value.since)) || !Array.isArray(value.recent) || value.recent.length > 200) throw new Error('Invalid statistics.');
   const validCounters = record => record && Object.keys(counters()).every(k => Number.isFinite(record[k]) && record[k] >= 0);
@@ -37,6 +46,7 @@ function validateStats(value) {
   }
   return structuredClone(value);
 }
+// Record job: receives state, { status, item, outputBytes = 0, seconds = 0, profile = '', storeFilenames = false, at = new Date(. See the return statements below for the result; async results are Promises.
 function recordJob(state, { status, item, outputBytes = 0, seconds = 0, profile = '', storeFilenames = false, at = new Date().toISOString(), id = crypto.randomUUID() }) {
   if (!['completed', 'failed', 'cancelled'].includes(status)) throw new Error('Invalid job status.');
   const next = validateStats(state);
@@ -67,10 +77,12 @@ function recordJob(state, { status, item, outputBytes = 0, seconds = 0, profile 
   next.recent = next.recent.slice(0, 200);
   return validateStats(next);
 }
+// Load state: receives directory, name, defaults, validate. Returns loaded state plus recovery/default information.
 async function loadState(directory, name, defaults, validate) {
   try { return { state: validate(JSON.parse(await fs.readFile(path.join(directory, name), 'utf8'))), warning: '' }; }
   catch (error) { return { state: defaults(), warning: error.code === 'ENOENT' ? '' : `${name} could not be read. Defaults are shown; the damaged file will not be overwritten.` }; }
 }
+// Save state: receives directory, name, state, validate, { reset = false } = {}. Completes after validated data has been written; failures reject the Promise.
 async function saveState(directory, name, state, validate, { reset = false } = {}) {
   const next = validate(state); await fs.mkdir(directory, { recursive: true });
   const target = path.join(directory, name);
@@ -82,6 +94,7 @@ async function saveState(directory, name, state, validate, { reset = false } = {
   return next;
 }
 // Bounded work, bounded ordering buffer. Discovery order survives concurrent probes.
+// Accepts candidates and inspect/publish callbacks; limits parallel work while publishing in discovery order.
 async function inspectInOrder(candidates, inspect, publish, concurrency = 2, signal) {
   const pending = [];
   const flush = async () => { const value = await pending.shift(); await publish(value); };
@@ -94,6 +107,7 @@ async function inspectInOrder(candidates, inspect, publish, concurrency = 2, sig
   } finally { while (pending.length) await flush(); }
 }
 const queueDefaults = () => ({ version: 1, items: [] });
+// Validate queue: receives value. Returns checked data or throws; do not trust saved/input JSON blindly.
 function validateQueue(value) {
   if (!value || value.version !== 1 || !Array.isArray(value.items)) throw new Error('Invalid saved queue.');
   const ids = new Set();
@@ -101,21 +115,25 @@ function validateQueue(value) {
     if (!item || typeof item.id !== 'string' || ids.has(item.id) || !path.isAbsolute(item.file || '') ||
         !['Ready', 'Unchanged', 'Needs attention', 'Converting', 'Verifying', 'Complete', 'Error', 'Cancelled'].includes(item.status)) throw new Error('Invalid saved queue item.');
     ids.add(item.id);
+    if (item.priority !== undefined && (!Number.isSafeInteger(item.priority) || item.priority < 0)) throw new Error('Invalid queue priority.');
     for (const key of ['output', 'temporaryOutput']) if (item[key] && !path.isAbsolute(item[key])) throw new Error('Invalid queue output path.');
     if (item.relativeDirectory && (path.isAbsolute(item.relativeDirectory) || item.relativeDirectory.split(/[\\/]/).includes('..'))) throw new Error('Invalid queue folder.');
     if (item.sidecars && (!Array.isArray(item.sidecars) || item.sidecars.some(s => !path.isAbsolute(s.file || '') || typeof s.suffix !== 'string' || /[\\/]/.test(s.suffix)))) throw new Error('Invalid queue subtitles.');
-    return { id: item.id, file: item.file, status: item.status, output: item.output || '', temporaryOutput: item.temporaryOutput || '', relativeDirectory: item.relativeDirectory || '', sidecars: item.sidecars || [], importWarnings: (item.importWarnings || []).filter(w => typeof w === 'string'), error: typeof item.error === 'string' ? item.error : '' };
+    return { id: item.id, file: item.file, status: item.status, ...(item.priority !== undefined ? { priority: item.priority } : {}), output: item.output || '', temporaryOutput: item.temporaryOutput || '', relativeDirectory: item.relativeDirectory || '', sidecars: item.sidecars || [], importWarnings: (item.importWarnings || []).filter(w => typeof w === 'string'), error: typeof item.error === 'string' ? item.error : '' };
   });
   return { version: 1, items: result };
 }
+// Load queue: receives directory, { clearCompletedOnRestart = false } = {}. Returns loaded state plus recovery/default information.
 async function loadQueue(directory, { clearCompletedOnRestart = false } = {}) {
   const loaded = await loadState(directory, 'queue.json', queueDefaults, validateQueue);
   if (clearCompletedOnRestart) loaded.state.items = loaded.state.items.filter(item => item.status !== 'Complete');
   return loaded;
 }
+// Save queue: receives directory, itemsMap. Completes after validated data has been written; failures reject the Promise.
 async function saveQueue(directory, itemsMap) {
   return saveState(directory, 'queue.json', { version: 1, items: [...itemsMap.values()] }, validateQueue);
 }
+// Accepts recovered jobs; removes only recorded validated partial files and returns cleanup warnings.
 async function cleanupInterrupted(items) {
   const warnings = [];
   for (const item of items) {

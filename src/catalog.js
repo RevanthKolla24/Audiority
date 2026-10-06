@@ -1,3 +1,8 @@
+/*
+ * catalog.js
+ * Offline receiver/device directory read by profile resolution and onboarding. Guide: format names; reviewed/user-reported presets; unverified directory models. Listing a model does not certify compatibility.
+ * Learning note: async functions return Promises; await gets their result and try/catch handles failure.
+ */
 // Offline directory. Only model-specific reviewed documentation enables presets.
 // Directory-only entries require explicit user capabilities; never inherit by brand.
 const modern = ['ac3', 'eac3', 'dts', 'dtshd', 'truehd', 'pcm'];
@@ -15,6 +20,7 @@ const idFor = name => name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
 for (const [brand, models] of Object.entries(directories)) {
   for (const model of models) receivers.push({ id: idFor(`${brand} ${model}`), name: `${brand} ${model}`, aliases: [model], status: 'directory-only', codecs: [], pcmBits: 24, pcmRate: 48000, pcmChannels: 2, connections: [], sources: [], note: 'Model directory entry only. Input capabilities have not been reviewed. Enable Advanced and confirm supported formats before using this model.' });
 }
+// Reviewed: receives name, codecs, source, extra = {}. See the return statements below for the result; async results are Promises.
 function reviewed(name, codecs, source, extra = {}) {
   Object.assign(receivers.find(r => r.name === name), { status: 'documented', codecs, pcmBits: 24, pcmRate: 192000, pcmChannels: 8, connections: ['hdmi', 'earc', 'arc', 'optical'], sources: [source], note: 'Documented digital input support; app, firmware, connection and TV passthrough still matter.', ...extra });
 }

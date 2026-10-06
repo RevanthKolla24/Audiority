@@ -1,7 +1,13 @@
+/*
+ * profiles.js
+ * Validates user settings and resolves the entire playback path for policy.js. Guide: defaults; rules; receiver/device/connection intersection; PCM limits; source codec families.
+ * Learning note: async functions return Promises; await gets their result and try/catch handles failure.
+ */
 const { receivers, devices } = require('./catalog');
 const FORMATS = ['dts', 'ac3', 'pcm'];
 const INPUTS = ['ac3', 'eac3', 'dts', 'dtshd', 'truehd', 'pcm', 'flac', 'alac', 'aac', 'mp3', 'opus', 'vorbis'];
 const defaultSettings = () => ({ version: 1, keepOriginal: false, normalizeVolume: false, receiverId: '', advanced: false, allowed: ['dts', 'ac3', 'pcm'], preserve: true, lossless: 'dts', lossy: 'ac3', stereo: 'pcm', ac3Bitrate: 640, dtsBitrate: 1411200, pcmBits: 24, pcmRate: 48000, rules: [], extractDtsCore: true, allowDownmix: false, downmixRules: [{ source: '7.1', target: '5.1(side)' }], excludedFormats: [], platform: 'local', deviceId: 'custom', player: '', connection: 'hdmi', tv: '', passthrough: 'unknown', pathConfirmed: false, pathCodecs: ['ac3', 'pcm'] });
+// Validate settings: receives value. Returns checked data or throws; do not trust saved/input JSON blindly.
 function validateSettings(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid playback settings.');
   const v = { ...defaultSettings(), ...value };
@@ -46,6 +52,7 @@ function validateSettings(value) {
   // Whitelist stored properties: never trust renderer-supplied effective capabilities.
   return Object.fromEntries([...Object.keys(defaultSettings()), 'normalizeVolume', 'keepOriginal'].map(key => [key, v[key]]));
 }
+// Accepts profile settings; returns effective formats/limits and warnings for receiver, player and connection together.
 function resolveProfile(settings) {
   const s = validateSettings(settings);
   const receiver = receivers.find(r => r.id === s.receiverId);
@@ -77,6 +84,7 @@ function resolveProfile(settings) {
   const pcmRate = Math.min(s.pcmRate, s.advanced ? s.pcmRate : receiver.pcmRate, ['arc', 'optical', 'coaxial', 'unknown'].includes(s.connection) ? 48000 : 192000);
   return { settings: s, keepOriginal: s.keepOriginal, name: receiver?.name || 'Custom receiver', supported, allowed, preserve: s.preserve, extractDtsCore: s.extractDtsCore, allowDownmix: s.allowDownmix, downmixRules: s.downmixRules, excludedFormats: s.excludedFormats, lossless: s.lossless, lossy: s.lossy, stereo: s.stereo, rules: s.advanced ? s.rules : [], ac3Bitrate: s.ac3Bitrate, dtsBitrate: s.dtsBitrate, pcmBits, pcmRate, warnings };
 }
+// Source format: receives stream. Returns the calculated value for the caller.
 function sourceFormat(stream) {
   if (stream.codec_name?.startsWith('pcm_')) return 'pcm';
   if (stream.codec_name === 'dts' && /HD|Master|HRA|Express|ES|96\/24/i.test(stream.profile || '')) return 'dtshd';

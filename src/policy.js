@@ -1,7 +1,13 @@
+/*
+ * policy.js
+ * Chooses copy, core extraction or encoding without writing media. Engine.js supplies probe/capability data; profiles.js supplies playback constraints. Guide: classification; defaults; profile rules; whole-file plans.
+ * Learning note: async functions return Promises; await gets their result and try/catch handles failure.
+ */
 const LOSSLESS = new Set(['flac', 'alac', 'truehd', 'mlp', 'wavpack', 'ape', 'tta', 'als', 'shorten']);
 const LOSSY = new Set(['aac', 'mp3', 'mp2', 'mp1', 'opus', 'vorbis', 'wmav1', 'wmav2', 'wmapro', 'amr_nb', 'amr_wb', 'ac4', 'atrac3', 'atrac3p', 'ac3', 'eac3']);
 const { sourceFormat } = require('./profiles');
 
+// Classify: receives stream. Returns the calculated value for the caller.
 function classify(stream) {
   const codec = stream.codec_name || '';
   // WavPack can be hybrid; absent a reliable lossless flag, retain it.
@@ -11,12 +17,14 @@ function classify(stream) {
   return LOSSY.has(codec) ? 'lossy' : 'unknown';
 }
 
+// Plan track: receives stream, capabilities, profile. See the return statements below for the result; async results are Promises.
 function planTrack(stream, capabilities, profile) {
   const track = planTrackAction(stream, capabilities, profile);
   if (track.action !== 'copy') track.keepOriginal = !!profile?.keepOriginal;
   return track;
 }
 
+// Plan track action: receives stream, capabilities, profile. See the return statements below for the result; async results are Promises.
 function planTrackAction(stream, capabilities, profile) {
   if (profile) return planProfileTrack(stream, capabilities, profile);
   const codec = stream.codec_name || 'unknown';
@@ -46,6 +54,7 @@ function planTrackAction(stream, capabilities, profile) {
   return { ...base, action: 'encode', codec: encoder, sampleRate: rate, bitrate: encoder === 'dca' ? '1411200' : channels === 1 ? '192k' : channels <= 2 ? '384k' : '640k', reason: `${type === 'lossless' ? 'Lossless source → high-bitrate DTS (lossy)' : 'Lossy source → Dolby Digital'}; same channel layout.${rate !== sourceRate ? ` Resampled to ${rate} Hz.` : ''}` };
 }
 
+// Accepts source/capabilities/profile; applies exclusions, explicit rules, core preference and approved downmixing to return an action.
 function planProfileTrack(stream, capabilities, profile) {
   const codec = stream.codec_name || 'unknown';
   const format = sourceFormat(stream);
@@ -110,6 +119,7 @@ function planProfileTrack(stream, capabilities, profile) {
   return unresolved(`no allowed encoder can ${downmix ? 'produce the requested' : 'retain the'} ${layout} layout${forced ? ` in requested ${forced.toUpperCase()}` : ''}.`);
 }
 
+// Plan file: receives probe, capabilities, profile. See the return statements below for the result; async results are Promises.
 function planFile(probe, capabilities, profile) {
   const tracks = (probe.streams || []).filter(s => s.codec_type === 'audio').map(s => planTrack(s, capabilities, profile));
   return { tracks, needsConversion: tracks.some(t => t.action !== 'copy'), warnings: [...(profile?.warnings || []), ...tracks.filter(t => t.warning).map(t => t.reason)], unresolved: tracks.some(t => t.compatibility === 'unresolved') };

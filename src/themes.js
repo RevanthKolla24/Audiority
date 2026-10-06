@@ -1,3 +1,8 @@
+/*
+ * themes.js
+ * Background palettes and safe custom-theme validation used by main.js. Guide: tokens/presets; validation; mutations; persistence; readability contrast. Imports are colors, not executable CSS.
+ * Learning note: async functions return Promises; await gets their result and try/catch handles failure.
+ */
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -25,6 +30,7 @@ for (const [id, name, mode, background, surface, sidebar, text, muted, accent] o
   const base = builtins.find(t => t.id === (mode === 'light' ? 'warm-light' : 'graphite'));
   builtins.push({ id, name, mode, colors: { ...base.colors, background, surface, sidebar, text, muted, accent, accentText: mode === 'light' ? '#ffffff' : '#182019', border: mode === 'light' ? '#c4c7ca' : '#52605d', hover: sidebar } });
 }
+// Validate theme: receives value. Returns checked data or throws; do not trust saved/input JSON blindly.
 function validateTheme(value) {
   if (!value || value.version !== 1 || typeof value.name !== 'string' || !value.name.trim() || value.name.trim().length > 80 || !['light','dark'].includes(value.mode)) throw new Error('Invalid theme: use version 1, a name (1–80 characters), and light/dark mode.');
   const colors = {};
@@ -35,6 +41,7 @@ function validateTheme(value) {
   return { version: 1, name: value.name.trim(), mode: value.mode, colors };
 }
 const defaults = () => ({ version: 1, activeId: 'warm-light', custom: [] });
+// Validate state: receives value. Returns checked data or throws; do not trust saved/input JSON blindly.
 function validateState(value) {
   if (!value || value.version !== 1 || !Array.isArray(value.custom)) throw new Error('Invalid appearance settings.');
   const ids = new Set(builtins.map(t => t.id));
@@ -45,6 +52,7 @@ function validateState(value) {
   if (!ids.has(value.activeId)) throw new Error('Active theme not found.');
   return { version: 1, activeId: value.activeId, custom };
 }
+// Mutate themes: receives state, action. See the return statements below for the result; async results are Promises.
 function mutateThemes(state, action) {
   const next = structuredClone(validateState(state));
   if (action.type === 'select') next.activeId = action.id;
@@ -63,10 +71,12 @@ function mutateThemes(state, action) {
   } else throw new Error('Unknown theme operation.');
   return validateState(next);
 }
+// Load themes: receives directory. Returns loaded state plus recovery/default information.
 async function loadThemes(directory) {
   try { return { state: validateState(JSON.parse(await fs.readFile(path.join(directory, 'appearance.json'), 'utf8'))), warning: '' }; }
   catch (error) { return { state: defaults(), warning: error.code === 'ENOENT' ? '' : 'Appearance settings could not be read. Using Warm Light; the damaged file will not be overwritten.' }; }
 }
+// Save themes: receives directory, state. Completes after validated data has been written; failures reject the Promise.
 async function saveThemes(directory, state) {
   const next = validateState(state);
   await fs.mkdir(directory, { recursive: true });
@@ -78,6 +88,7 @@ async function saveThemes(directory, state) {
   finally { await fs.unlink(temp).catch(() => {}); }
   return next;
 }
+// Contrast: receives a, b. Returns the calculated value for the caller.
 function contrast(a, b) {
   const luminance = hex => {
     const rgb = hex.slice(1).match(/../g).map(v => parseInt(v, 16) / 255).map(v => v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);

@@ -1,11 +1,18 @@
+/*
+ * ui/appearance.js
+ * Renderer-side theme editor using the DOM and preload bridge, not direct filesystem access. Guide: palette application; preview/contrast; editor; asynchronous persistence; events.
+ * Learning note: async functions return Promises; await gets their result and try/catch handles failure.
+ */
 let appearanceData, themeEditingId = null, themePending = false;
 const allThemes = () => [...appearanceData.builtins, ...appearanceData.state.custom];
 const activeTheme = () => allThemes().find(t => t.id === appearanceData.state.activeId);
+// Apply theme: receives theme. Updates state or visible controls; callers use the side effect.
 function applyTheme(theme) {
   for (const [name, color] of Object.entries(theme.colors)) document.documentElement.style.setProperty(`--theme-${name}`, color);
   document.documentElement.style.colorScheme = theme.mode;
   document.documentElement.dataset.theme = theme.id || 'preview';
 }
+// Refresh themes: receives no explicit arguments (uses current state). Updates state or visible controls; callers use the side effect.
 function refreshThemes() {
   $('theme-select').replaceChildren();
   for (const theme of allThemes()) { const option = element('option', '', theme.name); option.value = theme.id; $('theme-select').append(option); }
@@ -15,9 +22,11 @@ function refreshThemes() {
   applyTheme(activeTheme());
   if (typeof renderPresetThemes === 'function') renderPresetThemes();
 }
+// Theme draft: receives no explicit arguments (uses current state). Returns the calculated value for the caller.
 function themeDraft() {
   return { version: 1, name: $('theme-name').value, mode: $('theme-mode').value, colors: Object.fromEntries([...$('theme-colors').querySelectorAll('input')].map(input => [input.dataset.token, input.value])) };
 }
+// Contrast ratio: receives a,b. Returns the calculated value for the caller.
 function contrastRatio(a,b) {
   const lum = hex => {
     const rgb = hex.slice(1).match(/../g).map(v => parseInt(v,16)/255).map(v => v <= 0.04045 ? v/12.92 : ((v+0.055)/1.055)**2.4);
@@ -25,12 +34,14 @@ function contrastRatio(a,b) {
   };
   const x = lum(a), y = lum(b); return (Math.max(x,y)+0.05)/(Math.min(x,y)+0.05);
 }
+// Preview theme: receives no explicit arguments (uses current state). See the return statements below for the result; async results are Promises.
 function previewTheme() {
   const theme = themeDraft(); applyTheme(theme);
   const pairs = [['text','background'],['text','surface'],['text','sidebar'],['muted','background'],['muted','surface'],['accentText','accent'],['warning','warningBackground'],['danger','dangerBackground']];
   const low = pairs.filter(([a,b]) => contrastRatio(theme.colors[a],theme.colors[b]) < 4.5).map(([a,b]) => `${a} on ${b}`);
   $('theme-contrast').textContent = low.length ? `Low contrast: ${low.join(', ')}. Aim for at least 4.5:1 for readable text.` : 'Text contrast checks passed (4.5:1).';
 }
+// Edit theme: receives existing. See the return statements below for the result; async results are Promises.
 function editTheme(existing) {
   themeEditingId = existing ? activeTheme().id : null;
   const theme = activeTheme();
@@ -42,7 +53,9 @@ function editTheme(existing) {
   }
   previewTheme();
 }
+// Discard theme: receives no explicit arguments (uses current state). See the return statements below for the result; async results are Promises.
 function discardTheme() { $('theme-form').hidden = true; if (appearanceData) applyTheme(activeTheme()); }
+// Change theme: receives action. See the return statements below for the result; async results are Promises.
 async function changeTheme(action) {
   if (themePending) return;
   themePending = true; $('theme-error').textContent = '';

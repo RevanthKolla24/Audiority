@@ -1,4 +1,12 @@
+/*
+ * preload.js
+ * Isolated bridge between the UI and Electron. Exposes named operations instead of unrestricted Node.js access. Guide: request methods; dropped-file paths; backend update subscription.
+ * Learning note: async functions return Promises; await gets their result and try/catch handles failure.
+ */
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
+// main.js enables contextIsolation (separate JS worlds), sandbox (restricted renderer),
+// and disables nodeIntegration. The bridge grants specific operations, not filesystem access.
+// invoke sends a request to ipcMain and returns a Promise; on listens for pushed updates.
 contextBridge.exposeInMainWorld('audiority', {
   getSetup: () => ipcRenderer.invoke('get-setup'),
   previewProfile: value => ipcRenderer.invoke('preview-profile', value),
@@ -16,6 +24,7 @@ contextBridge.exposeInMainWorld('audiority', {
   addFiles: files => ipcRenderer.invoke('add-files', files.map(file => webUtils.getPathForFile(file))),
   pickOutput: () => ipcRenderer.invoke('pick-output'),
   start: () => ipcRenderer.invoke('start'),
+  prioritizeItem: id => ipcRenderer.invoke('prioritize-item', id),
   cancel: () => ipcRenderer.invoke('cancel'),
   clear: () => ipcRenderer.invoke('clear'),
   reveal: id => ipcRenderer.invoke('reveal', id),

@@ -1,4 +1,10 @@
+/*
+ * engine.js
+ * Runs FFmpeg and FFprobe in the Node.js background process. Main.js supplies jobs; policy.js supplies decisions. Guide: subprocesses and hashes; capabilities; inspection; verification; conversion; safe publication.
+ * Learning note: async functions return Promises; await gets their result and try/catch handles failure.
+ */
 const { spawn } = require('node:child_process');
+// fs/promises lets disk operations be awaited instead of blocking the Node.js event loop.
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -10,12 +16,14 @@ const { validatePreferences, preferencesDefaults } = require('./app-state');
 // COPYFILE_EXCL refuses existing destinations but is not atomic publication:
 // the final pathname is visible while copying. Never unlink on copy failure;
 // Node handles its failed copy, and the pathname may belong to someone else.
+// Accepts a verified temp file and output folder/name; returns destination and whether copying was needed.
 async function publishOutput(temp, directory, basename, { io = fs, signal } = {}) {
   let copyOnly = false;
   for (let i = 0; i < 10000; i++) {
     if (signal?.aborted) throw new Error('Cancelled');
     const destination = path.join(directory, `${basename}${i ? ` (${i})` : ''}.mkv`);
     if (!copyOnly) {
+      // A hard link gives the same bytes a second name atomically, refusing an existing name.
       try { await io.link(temp, destination); return { destination, copied: false }; }
       catch (error) {
         if (error.code === 'EEXIST') continue;
@@ -27,6 +35,7 @@ async function publishOutput(temp, directory, basename, { io = fs, signal } = {}
       if (space.bavail * space.bsize < size + 64 * 1024 * 1024) throw new Error('Insufficient free space for exclusive-copy publication; this filesystem requires a second full output copy.');
     }
     try {
+      // EXCL refuses existing destinations. Unlike a link, copying exposes the name before all bytes arrive.
       await io.copyFile(temp, destination, require('node:fs').constants.COPYFILE_EXCL);
       return { destination, copied: true };
     } catch (error) {
@@ -36,20 +45,25 @@ async function publishOutput(temp, directory, basename, { io = fs, signal } = {}
   }
   throw new Error('Could not find an unused output filename.');
 }
+// Accepts a path and cancellation signal; returns a SHA-256 fingerprint using bounded read chunks.
 async function hashFile(file, signal) {
   const hash = crypto.createHash('sha256');
   for await (const chunk of require('node:fs').createReadStream(file, { signal })) hash.update(chunk);
   return hash.digest('hex');
 }
+// Accepts probe executable/arguments/signal; returns a hash of its output without storing a huge JSON string.
 async function hashProbe(binary, args, signal) {
   const hash = crypto.createHash('sha256');
   await run(binary, args, { signal, onLine: line => hash.update(`${line}\n`) });
   return hash.digest('hex');
 }
 
+// Accepts an executable and argument array; returns a Promise for output or rejects on tool failure/cancellation.
 function run(binary, args, { signal, onLine } = {}) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(new Error('Cancelled'));
+    // spawn starts a separate OS process. An argument array avoids shell parsing of filenames.
+    // Pipes let us read progress/errors; ignored stdin prevents the tool waiting for keyboard input.
     const child = spawn(binary, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '', stderr = '', pending = '';
     const abort = () => { child.kill(); };
@@ -73,6 +87,7 @@ function run(binary, args, { signal, onLine } = {}) {
   });
 }
 
+// Accepts encoder help text; returns supported sample rates and layouts advertised by this FFmpeg build.
 function parseCapabilities(text) {
   return {
     layouts: (text.match(/Supported channel layouts:\s*([^\r\n]+)/)?.[1] || '').trim().split(/\s+/).filter(Boolean),
@@ -81,31 +96,43 @@ function parseCapabilities(text) {
 }
 
 class Engine {
+  // Accepts executable paths; initializes this worker without starting any conversion.
   constructor(tools) { this.tools = tools; this.capabilities = null; this.profile = null; this.keepOriginal = false; }
+  // Accepts global settings; stores original-retention behavior for later planning.
   setPreferences(preferences) { this.keepOriginal = !!preferences.keepOriginal; }
+  // Accepts resolved playback constraints; stores them for subsequent jobs.
   setProfile(profile) { this.profile = profile; }
+  // Accepts an inspected job; refreshes its plan and returns the job, without converting media.
   replan(item) { item.plan = planFile(item.probe, this.capabilities, this.profile); if (this.keepOriginal) for (const track of item.plan.tracks) if (track.action !== 'copy') track.keepOriginal = true; return item; }
+  // Inspects actual tool support; resolves when cached encoder capabilities are ready.
   async initialize() {
     const entries = await Promise.all(['dca', 'ac3'].map(async encoder => {
+      // -h encoder=... asks for encoder help (layouts/rates); it does not process any media.
       const { stdout, stderr } = await run(this.tools.ffmpeg, ['-hide_banner', '-h', `encoder=${encoder}`]);
       return [encoder, parseCapabilities(stdout + stderr)];
     }));
     this.capabilities = Object.fromEntries(entries);
     return this.capabilities;
   }
+  // Uses this worker's executables; returns version strings for diagnostics.
   async toolVersions() {
     const versions = {};
     for (const [name, binary] of Object.entries(this.tools)) versions[name] = (await run(binary, ['-version'])).stdout.split('\n')[0];
     return versions;
   }
+  // Probe: receives file, signal. See the return statements below for the result; async results are Promises.
   async probe(file, signal) {
+    // Probe container, streams and chapters as JSON; -v error hides informational chatter.
     const result = await run(this.tools.ffprobe, ['-v', 'error', '-show_format', '-show_streams', '-show_chapters', '-of', 'json', file], { signal });
     return JSON.parse(result.stdout);
   }
+  // Inspect dts core: receives file, index, signal. See the return statements below for the result; async results are Promises.
   async inspectDtsCore(file, index, signal) {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'audiority-core-'));
     try {
       const sample = path.join(directory, 'core.dts');
+      // Select one absolute input stream, copy a two-second sample, strip extensions,
+      // and force raw DTS output so we can inspect the legacy core's real properties.
       await run(this.tools.ffmpeg, ['-v', 'error', '-nostdin', '-i', file, '-map', `0:${index}`, '-t', '2', '-c:a', 'copy', '-bsf:a', 'dca_core', '-f', 'dts', sample], { signal });
       const probe = await this.probe(sample, signal);
       const core = probe.streams.find(s => s.codec_name === 'dts');
@@ -116,6 +143,7 @@ class Engine {
       return null;
     } finally { await fs.rm(directory, { recursive: true, force: true }); }
   }
+  // Inspect: receives file, { signal } = {}. See the return statements below for the result; async results are Promises.
   async inspect(file, { signal } = {}) {
     const stat = await fs.stat(file);
     if (!stat.isFile()) throw new Error('Please choose a file, not a folder.');
@@ -133,6 +161,7 @@ class Engine {
     return { file, name: path.basename(file), size: stat.size, duration: Number(probe.format?.duration) || 0, probe, plan,
       subtitleInfo: { count: subtitles.length, ass: subtitles.filter(s => ['ass', 'ssa'].includes(s.codec_name)).length, fonts: fonts.length, attachments: attachments.length } };
   }
+  // Accepts job/output/signal; compares content and metadata with bounded parallel probes, throwing on mismatch.
   async verifySubtitles(item, outputFile, signal) {
     // Stream copy must preserve ASS style headers, subtitle packets and all
     // attachment payloads. No decode/render step is used or implied here.
@@ -145,6 +174,8 @@ class Engine {
     if (signal?.aborted) abort();
     let next = 0, failure;
     const verify = async source => {
+      // Select one stream; fingerprint codec header/font data and retain only relevant
+      // tags/dispositions. Subtitle packet hashes additionally check the actual text/events.
       const args = ['-v', 'error', '-select_streams', String(source.index), '-show_streams', '-show_data_hash', 'sha256', '-show_entries', 'stream=codec_name,extradata_hash:stream_tags=language,title,filename,mimetype:stream_disposition=default,forced'];
       if (source.codec_type === 'subtitle') args.push('-show_packets', '-show_entries', 'stream=codec_name,extradata_hash:stream_tags=language,title,filename,mimetype:stream_disposition=default,forced:packet=data_hash');
       args.push('-of', 'json');
@@ -181,6 +212,7 @@ class Engine {
       signal?.removeEventListener('abort', abort);
     }
   }
+  // Accepts a planned job, folder and callbacks; returns verified output paths, warnings and size after publication.
   async convert(item, directory, { signal, onProgress = () => {}, onTemporaryOutput = async () => {}, preferences = preferencesDefaults() } = {}) {
     preferences = validatePreferences(preferences);
     // Use a local plan snapshot; never mutate the displayed queue during execution.
@@ -200,6 +232,11 @@ class Engine {
     if (space.bavail * space.bsize < item.size + audioBytes + 64 * 1024 * 1024) throw new Error('Insufficient free space for a safe conversion.');
     const basename = `${path.parse(item.name).name}${preferences.outputSuffix}`;
     const temp = path.join(directory, `.${basename}.${crypto.randomUUID()}.partial.mkv`);
+    // -i opens the source; -n refuses overwrite; -nostdin forbids interactive prompts.
+    // -map 0 selects ALL streams from input zero, not just FFmpeg's automatic favorites.
+    // Metadata/chapters come from input zero; -c copy avoids decoding/encoding by default.
+    // Later per-audio options override copy. Extra mappings append compatibility streams,
+    // so stream indices must be matched carefully during verification, not assumed unchanged.
     const args = ['-hide_banner', '-nostdin', '-v', 'warning', '-n', '-i', item.file, '-map', '0', '-map_metadata', '0', '-map_chapters', '0', '-c', 'copy'];
     let addedAudioCount = 0;
     const originalAudio = item.probe.streams.filter(s => s.codec_type === 'audio');
@@ -220,6 +257,7 @@ class Engine {
         args.push('-map', `0:${track.index}`);
         args.push(`-metadata:s:a:${targetIndex}`, `title=${track.title ? `${track.title} · ` : ''}Compatibility (${track.codec === 'dca' ? 'DTS' : track.codec.toUpperCase()})`);
       }
+      // A bitstream filter removes DTS extensions without decoding/re-encoding the legacy core.
       if (track.action === 'extract') { args.push(`-bsf:a:${targetIndex}`, 'dca_core'); return; }
       if (track.action !== 'encode') return;
       args.push(`-c:a:${targetIndex}`, track.codec);
@@ -228,7 +266,12 @@ class Engine {
       if (track.bitrate) args.push(`-b:a:${targetIndex}`, track.bitrate);
       if (track.sampleRate) args.push(`-ar:a:${targetIndex}`, String(track.sampleRate));
       const filters = [];
+      // aresample rematrixing combines weighted input channels into the requested speaker layout.
+      // Stereo means combining surround contributions into left/right, not just dropping speakers.
+      // rematrix_maxval limits mixing coefficients; it is not a guarantee against every clipping case.
       if (track.downmix) filters.push(`aresample=out_chlayout=${track.layout}:rematrix_maxval=1`);
+      // dynaudnorm adjusts time-varying gain (150 ms frames, 15-frame smoothing window).
+      // It changes overall dynamics, not dialogue independently, and only runs on encoded tracks.
       if (preferences.normalizeVolume || this.profile?.settings?.normalizeVolume) filters.push('dynaudnorm=f=150:g=15');
       if (filters.length) args.push(`-filter:a:${targetIndex}`, filters.join(','));
       // Explicit layout prevents automatic downmixing to another encoder layout.
@@ -244,6 +287,8 @@ class Engine {
       const output = await this.probe(temp, signal);
       verifyOutput(item, output);
       for (const [i, track] of item.plan.tracks.entries()) if (track.keepOriginal) {
+        // a:i means the i-th audio stream (not absolute stream index). Compare compressed
+        // packet payload hashes to prove copied/retained audio bytes were not re-encoded.
         const hashArgs = ['-v', 'error', '-select_streams', `a:${i}`, '-show_packets', '-show_data_hash', 'sha256', '-show_entries', 'packet=data_hash', '-of', 'json'];
         const hashes = await Promise.allSettled([hashProbe(this.tools.ffprobe, [...hashArgs, item.file], signal), hashProbe(this.tools.ffprobe, [...hashArgs, temp], signal)]);
         const failure = hashes.find(result => result.status === 'rejected');
@@ -274,6 +319,7 @@ class Engine {
   }
 }
 
+// Accepts source job and output probe data; throws if stream counts, audio properties or duration disagree.
 function verifyOutput(item, output) {
   const sourceStreams = item.probe.streams;
   const added = item.plan.tracks.filter(t => t.keepOriginal && t.action !== 'copy').length;

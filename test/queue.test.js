@@ -4,14 +4,35 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
 const { loadQueue, saveQueue, validateQueue, cleanupInterrupted, preferencesDefaults, validatePreferences } = require('../src/app-state');
+const { nextQueueItem } = require('../src/queue-priority');
+
+test('dynamic priority selects newest first, preserves retries and never repeats failed attempts', () => {
+  const make = id => ({ id, status: 'Ready', plan: { needsConversion: true } });
+  const a = make('a'), b = make('b'), c = make('c');
+  const items = new Map([a, b, c].map(item => [item.id, item]));
+  const attempted = new Set();
+  assert.equal(nextQueueItem(items, attempted), a);
+  attempted.add(a.id); a.status = 'Converting';
+  c.priority = 10; b.priority = 11;
+  assert.equal(nextQueueItem(items, attempted), b);
+  attempted.add(b.id); b.status = 'Error';
+  assert.equal(nextQueueItem(items, attempted), c);
+  attempted.add(c.id); c.status = 'Cancelled';
+  assert.equal(nextQueueItem(items, attempted), undefined);
+  assert.equal(nextQueueItem(items, new Set()), b);
+  b.output = '/completed.mkv';
+  assert.equal(nextQueueItem(items, new Set()), c);
+});
 
 test('queue round trips, filters completed only when requested, and refuses corrupt storage', async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'audiority-queue-'));
   try {
-    const ready = { id: 'one', file: path.join(directory, 'one.mkv'), status: 'Ready', relativeDirectory: 'Show/Season 01' };
+    const ready = { id: 'one', file: path.join(directory, 'one.mkv'), status: 'Ready', relativeDirectory: 'Show/Season 01', priority: 123456 };
     const complete = { id: 'two', file: path.join(directory, 'two.mkv'), status: 'Complete', output: path.join(directory, 'two.audiority.mkv') };
     await saveQueue(directory, new Map([[ready.id, ready], [complete.id, complete]]));
     assert.equal((await loadQueue(directory)).state.items.length, 2);
+    assert.equal((await loadQueue(directory)).state.items[0].priority, ready.priority);
+    for (const priority of [-1, NaN, Infinity, '123', 1.5]) assert.throws(() => validateQueue({ version: 1, items: [{ ...ready, priority }] }));
     assert.equal((await loadQueue(directory, { clearCompletedOnRestart: true })).state.items.length, 1);
     assert.equal(validatePreferences({ ...preferencesDefaults(), clearCompletedOnRestart: true }).clearCompletedOnRestart, true);
     assert.throws(() => validateQueue({ version: 1, items: [{ ...ready, relativeDirectory: '../escape' }] }));
