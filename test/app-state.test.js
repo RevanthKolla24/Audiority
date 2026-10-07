@@ -90,6 +90,6 @@ test('real conversion honors output suffix, flat output, thread option and strea
     assert.equal(result.output, path.join(await fs.realpath(directory), 'episode.compatible.mkv')); assert.equal(result.outputBytes, (await fs.stat(result.output)).size);
     assert.equal(await hashFile(input), require('node:crypto').createHash('sha256').update(await fs.readFile(input)).digest('hex'));
     const args = ['-v', 'error', '-select_streams', 'a:0', '-show_packets', '-show_data_hash', 'sha256', '-show_entries', 'packet=data_hash', '-of', 'json', input];
-    assert.equal(await hashProbe(tools.ffprobe, args), require('node:crypto').createHash('sha256').update((await run(tools.ffprobe, args)).stdout).digest('hex'));
+    assert.equal(await hashProbe(tools.ffprobe, args), require('node:crypto').createHash('sha256').update((await run(tools.ffprobe, args)).stdout.replace(/\r\n/g, '\n')).digest('hex'));
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 });
