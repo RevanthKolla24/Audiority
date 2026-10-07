@@ -54,7 +54,7 @@
     <div class="import-controls"><button id="import-folder">Import folder…</button><button id="cancel-import" class="quiet" hidden>Cancel import</button><span id="import-progress" role="status"></span></div>
     <details id="import-report" hidden><summary>Import summary</summary><p id="import-result"></p></details>
     <div class="queue-tools"><button id="clear" class="quiet">Clear queue</button></div>
-    <section aria-label="Conversion queue"><div class="queue-heading"><h2>Conversion queue <span id="count">0</span></h2><span>One file at a time · local CPU processing</span></div><div id="queue"><p id="empty">Import a file to see exactly what will change.</p></div></section>
+    <section aria-label="Conversion queue"><div class="queue-heading"><h2>Conversion queue <span id="count">0</span></h2><span>One file at a time · local CPU processing</span></div><div id="queue"></div></section>
     <p class="notice">DTS and Dolby Digital are lossy. Unlisted layouts remain unresolved; downmixing requires explicit profile rules. Existing tracks are copied only if the playback profile supports them. Output: MKV. Profiles do not guarantee Plex/Jellyfin direct play.</p>
     <footer><span id="summary">Ready when you are.</span><div class="queue-footer-actions"><button id="folder" type="button" class="output-shortcut" aria-label="Change output folder">Exporting to: <span id="destination">No folder selected</span></button><button id="pause" class="quiet" type="button" aria-pressed="false" hidden disabled>Pause</button><button id="cancel" class="quiet" disabled>Cancel queue</button><button id="start" class="primary" disabled>Convert queue →</button></div></footer>
     </section>

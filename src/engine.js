@@ -314,13 +314,25 @@ class Engine {
       // Explicit layout prevents automatic downmixing to another encoder layout.
       args.push(`-channel_layout:a:${targetIndex}`, track.layout);
     });
-    args.push('-progress', 'pipe:1', '-nostats', '-f', 'matroska', temp);
+    // Put attachments after appended compatibility audio. Newer Matroska muxers
+    // can mis-handle attachment streams interleaved before those added tracks.
+    if (duplicated.length && item.probe.streams.some(s => s.codec_type === 'attachment')) {
+      args.push('-map', '-0:t');
+      for (const stream of item.probe.streams.filter(s => s.codec_type === 'attachment')) args.push('-map', `0:${stream.index}`);
+    }
+    // Explicitly retain attachment codecs even when appended audio changes stream order.
+    args.push('-c:t', 'copy', '-progress', 'pipe:1', '-nostats', '-f', 'matroska', temp);
     try {
       await onTemporaryOutput(temp);
       await run(this.tools.ffmpeg, args, { signal, onLine: line => {
-        if (line.startsWith('out_time_us=')) onProgress(duration ? Math.min(0.99, Math.max(0, Number(line.slice(12)) / 1e6 / duration)) : 0);
+        if (line.startsWith('out_time_us=')) {
+          const elapsed = Number(line.slice(12));
+          if (Number.isFinite(elapsed)) onProgress(Number.isFinite(duration) && duration > 0 ? Math.min(0.99, Math.max(0, elapsed / 1e6 / duration)) : 0);
+        }
       } });
       if (signal?.aborted) throw new Error('Cancelled');
+      // Process exit, not its final timestamp, starts verification. Complete is sent only after publication.
+      onProgress(0.99);
       const output = await this.probe(temp, signal);
       verifyOutput(item, output);
       for (const [i, track] of item.plan.tracks.entries()) if (track.keepOriginal) {

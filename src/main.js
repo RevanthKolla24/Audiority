@@ -3,7 +3,11 @@
  * Coordinates Electron in the invisible background process. Talks to the web UI through preload.js. Guide: queue persistence; imports; startup recovery; secure window; IPC handlers; conversion runner; shutdown.
  * Learning note: async functions return Promises; await gets their result and try/catch handles failure.
  */
-const { app, BrowserWindow, ipcMain, dialog, shell, powerSaveBlocker } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, powerSaveBlocker, nativeImage } = require('electron');
+// Only the owning instance may sweep temporary outputs or write queue state.
+const ownsInstance = app.requestSingleInstanceLock();
+if (!ownsInstance) app.exit(0);
+app.on('second-instance', () => { if (window) { if (window.isMinimized()) window.restore(); window.show(); window.focus(); } });
 // Electron's main process can access the OS; the renderer is a restricted web page.
 // app controls lifecycle, BrowserWindow hosts that page, and ipcMain receives bridge requests.
 const path = require('node:path');
@@ -126,6 +130,9 @@ function publishItem(item, id = item.id) {
 }
 
 app.whenReady().then(async () => {
+  if (!ownsInstance) return;
+  const appIcon = path.join(__dirname, 'assets', 'logo.png');
+  if (process.platform === 'darwin' && app.dock) app.dock.setIcon(appIcon);
   engine = new Engine(toolPaths(app.isPackaged ? process.resourcesPath : null));
   const loadedPreferences = await loadState(app.getPath('userData'), 'app-settings.json', preferencesDefaults, validatePreferences);
   preferences = loadedPreferences.state; preferencesWarning = loadedPreferences.warning;
@@ -164,7 +171,7 @@ app.whenReady().then(async () => {
   }
   if (!recovered.warning) await persistQueue();
   // Isolation keeps preload privileges separate; sandbox and no Node integration restrict UI code.
-  window = new BrowserWindow({ width: 1240, height: 850, minWidth: 960, minHeight: 680, backgroundColor: '#f5f5f3', title: 'Audiority', webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
+  window = new BrowserWindow({ icon: appIcon, width: 1240, height: 850, minWidth: 960, minHeight: 680, backgroundColor: '#f5f5f3', title: 'Audiority', webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
@@ -191,6 +198,17 @@ app.whenReady().then(async () => {
   handle('pick-watch-folder', async () => {
     const selection = await dialog.showOpenDialog(window, { properties: ['openDirectory'], title: 'Choose watch folder' });
     return selection.canceled ? '' : selection.filePaths[0];
+  });
+  handle('update-theme-icon', dataURL => {
+    // Accept only a small, fixed-size PNG from our trusted renderer, not paths or arbitrary images.
+    if (typeof dataURL !== 'string' || dataURL.length > 350000 || !/^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/.test(dataURL)) throw new Error('Invalid theme icon.');
+    const bytes = Buffer.from(dataURL.slice('data:image/png;base64,'.length), 'base64');
+    if (bytes.length < 24 || bytes.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a' || bytes.toString('ascii', 12, 16) !== 'IHDR' || bytes.readUInt32BE(16) !== 256 || bytes.readUInt32BE(20) !== 256) throw new Error('Theme icon must be a 256 × 256 PNG.');
+    const icon = nativeImage.createFromDataURL(dataURL);
+    if (icon.isEmpty() || icon.getSize().width !== 256 || icon.getSize().height !== 256) throw new Error('Invalid theme icon image.');
+    if (process.platform === 'darwin') { if (app.dock) app.dock.setIcon(icon); }
+    else for (const activeWindow of BrowserWindow.getAllWindows()) if (!activeWindow.isDestroyed()) activeWindow.setIcon(icon);
+    return true;
   });
   handle('get-app-settings', () => ({ preferences, warning: preferencesWarning, outputDirectory, version: app.getVersion() }));
   handle('save-app-settings', async value => {
@@ -365,10 +383,16 @@ app.whenReady().then(async () => {
   window.loadFile(page);
   watchTimer = setInterval(() => { void pollWatchFolder(); }, 30000);
 });
-let queueQuitReady = false;
+let queueQuitReady = false, queueQuitPending = false;
 app.on('before-quit', event => {
   if (queueQuitReady) return;
   event.preventDefault();
+  if (queueQuitPending) return;
+  if (running || importing) {
+    const choice = dialog.showMessageBoxSync({ type: 'question', buttons: ['Keep working', 'Cancel and quit'], defaultId: 0, cancelId: 0, message: 'Work is in progress. Cancel and quit?', detail: 'The queue will be saved. Interrupted conversions restart from the beginning.' });
+    if (choice !== 1) return;
+  }
+  queueQuitPending = true;
   watchStopping = true; clearInterval(watchTimer);
   cancelQueue(); importController?.abort();
   (async () => {

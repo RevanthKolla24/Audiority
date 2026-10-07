@@ -4,6 +4,32 @@
  * Learning note: async functions return Promises; await gets their result and try/catch handles failure.
  */
 let appearanceData, themeEditingId = null, themePending = false;
+let iconFrame = null, paintedIconColors = '';
+// Canvas stays off-screen. Batch rapid color-picker previews into one paint per frame.
+function scheduleThemeIcon(theme) {
+  if (iconFrame !== null) cancelAnimationFrame(iconFrame);
+  iconFrame = requestAnimationFrame(() => {
+    iconFrame = null;
+    const background = theme.colors.accent, foreground = theme.colors.accentText;
+    const key = `${background}:${foreground}`;
+    if (key === paintedIconColors) return;
+    const canvas = document.createElement('canvas'); canvas.width = canvas.height = 256;
+    const context = canvas.getContext('2d');
+    if (!context) return;
+    context.fillStyle = background;
+    context.beginPath(); context.roundRect(8, 8, 240, 240, 56); context.fill();
+    context.font = 'bold italic 190px Georgia, "Times New Roman", serif';
+    context.fillStyle = foreground; context.textAlign = 'left'; context.textBaseline = 'alphabetic';
+    const metrics = context.measureText('a');
+    // Center the visible ink, rather than the font's invisible advance/baseline box.
+    const x = 128 + (metrics.actualBoundingBoxLeft - metrics.actualBoundingBoxRight) / 2;
+    const y = 128 + (metrics.actualBoundingBoxAscent - metrics.actualBoundingBoxDescent) / 2;
+    context.fillText('a', x, y);
+    api.updateThemeIcon(canvas.toDataURL('image/png')).then(() => { paintedIconColors = key; }).catch(error => {
+      $('theme-error').textContent = `Theme applied, but the app icon could not update: ${error.message}`;
+    });
+  });
+}
 const allThemes = () => [...appearanceData.builtins, ...appearanceData.state.custom];
 const activeTheme = () => allThemes().find(t => t.id === appearanceData.state.activeId);
 // Apply theme: receives theme. Updates state or visible controls; callers use the side effect.
@@ -11,6 +37,7 @@ function applyTheme(theme) {
   for (const [name, color] of Object.entries(theme.colors)) document.documentElement.style.setProperty(`--theme-${name}`, color);
   document.documentElement.style.colorScheme = theme.mode;
   document.documentElement.dataset.theme = theme.id || 'preview';
+  scheduleThemeIcon(theme);
 }
 // Refresh themes: receives no explicit arguments (uses current state). Updates state or visible controls; callers use the side effect.
 function refreshThemes() {

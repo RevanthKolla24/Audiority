@@ -1,0 +1,71 @@
+AUDIORITY — APPLICATION LICENSE AND LOCAL DATA NOTICE
+
+Release-review draft: the project owner must review this document before
+public distribution. This notice is not a legal compliance certification.
+
+APPLICATION LICENSE
+
+MIT License
+
+Copyright (c) 2026 Audiority contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+THIRD-PARTY SOFTWARE
+
+Electron, FFmpeg, FFprobe and other dependencies have their own licenses.
+This application license does not replace or restrict rights granted by those
+licenses. Reviewed FFmpeg/FFprobe notices and source-distribution information
+are bundled in the application's tools/notices resources directory. Review
+the notices included with the actual release for its build-specific terms.
+
+LOCAL DATA AND PRIVACY NOTICE
+
+Audiority processes media locally. The current application does not include
+telemetry, a cloud conversion service, or an analytics upload feature.
+
+It stores settings, playback profiles, themes, queue recovery records and
+optional conversion statistics in the operating system's application-data
+directory. Queue records contain source, subtitle and output paths regardless
+of the statistics filename setting. Statistics omit filenames by default;
+users may enable them, disable statistics recording, export or reset statistics.
+Diagnostic and history exports are written locally at the user's request.
+If you share an export, inspect it first for paths or other private details.
+Clearing a queue or resetting statistics does not delete converted media.
+Local backup files may retain previous saved records.
+
+FILE ACCESS AND OPTIONAL AUTOMATION
+
+Audiority reads imported media and writes converted media to the selected
+destination. Enabled watch folders are scanned while the app is running.
+The optional Auto-Trash setting moves original media to the operating system
+Trash/Recycle Bin after a successful verified conversion. It is disabled by
+default. Keep independent backups: Trash contents can be removed by the user
+or operating system, and lossy conversion does not preserve all information.
+
+INSTALLATION
+
+The Windows installer installs for all users and requests administrator
+authorization. This does not require running Audiority itself as administrator.
+macOS installation and file-access authorization are managed by macOS and
+depend on the destination, user account and system configuration.
+
+Acknowledging this document does not waive rights under the MIT license,
+third-party licenses or applicable law. The local-data notice describes the
+current application; future changes require review before release.

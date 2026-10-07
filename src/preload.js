@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld('audiority', {
   statisticsOperation: action => ipcRenderer.invoke('statistics-operation', action),
   exportDiagnostics: () => ipcRenderer.invoke('export-diagnostics'),
   themeOperation: action => ipcRenderer.invoke('theme-operation', action),
+  updateThemeIcon: dataURL => ipcRenderer.invoke('update-theme-icon', dataURL),
   addFiles: files => ipcRenderer.invoke('add-files', files.map(file => webUtils.getPathForFile(file))),
   pickWatchFolder: () => ipcRenderer.invoke('pick-watch-folder'),
   pickOutput: () => ipcRenderer.invoke('pick-output'),

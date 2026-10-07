@@ -96,7 +96,7 @@ function patchCardState(card, item) {
     if (!body) { body = element('div', 'item-content'); card.prepend(body); }
     body.replaceChildren();
     const head = element('div', 'item-head');
-    const info = element('div'); info.append(element('div', 'name', item.name));
+    const info = element('div'); const name = element('div', 'name', item.name); name.title = item.name; info.append(name);
     if (item.size) info.append(element('div', 'meta', `${(item.size / 1024 ** 3).toFixed(2)} GB · ${Math.round(item.duration)} seconds · ${item.tracks?.length || 0} audio track(s)`));
     head.append(info, element('span', 'status')); body.append(head);
     if (item.relativeDirectory) body.append(element('p', 'meta', `Output: ${item.relativeDirectory}`));
@@ -166,7 +166,13 @@ function render() {
   for (const orphan of existing.values()) orphan.remove();
   const empty = queue.querySelector('.queue-empty') || queue.querySelector('#empty');
   if (all.length) empty?.remove();
-  else if (!empty) queue.append(element('p', 'queue-empty', 'Import a file to see exactly what will change.'));
+  else if (!empty) {
+    const state = element('div', 'queue-empty');
+    const logo = element('img', 'queue-empty-logo');
+    logo.src = '../assets/logo.png'; logo.alt = 'Audiority logo';
+    state.append(logo, element('h2', '', 'Your queue is ready'), element('p', '', 'Import files or a folder above to preview your conversion plan.'), element('small', '', 'Local processing · Original files stay untouched unless Auto-Trash is enabled.'));
+    queue.append(state);
+  }
   for (let i = 0; i < expected.length; i++) if (queue.children[i] !== expected[i]) queue.insertBefore(expected[i], queue.children[i] || null);
   let nav = queue.querySelector('.queue-pagination');
   if (all.length > queuePageSize) {

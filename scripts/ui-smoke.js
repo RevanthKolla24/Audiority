@@ -22,6 +22,8 @@ app.on('browser-window-created', (_event, window) => {
         throw new Error(`Timed out waiting for ${code}`);
       };
       await waitFor(`document.getElementById('catalog-count').textContent.includes('126')`);
+      await waitFor(`document.querySelector('.queue-empty-logo')?.complete && document.querySelector('.queue-empty-logo').naturalWidth > 0`);
+      assert.equal(await execute(`document.querySelector('.queue-empty-logo').alt`), 'Audiority logo');
       const progressChecks = await execute(`(() => {
         const item = { id: 'progress-test', name: 'ETA test', status: 'Converting', progress: 0.5, progressStart: Date.now() - 10000 };
         items.set(item.id, item);
@@ -163,6 +165,29 @@ app.on('browser-window-created', (_event, window) => {
       assert.equal(await execute(`document.getElementById('workspace').hidden`), false);
       await waitFor(`!document.getElementById('advanced-rules-dialog').open`);
       await waitFor(`document.getElementById('theme-select').options.length === 12`);
+      await waitFor(`paintedIconColors.length > 0`);
+      const iconChecks = await execute(`(async () => {
+        const originalExport = HTMLCanvasElement.prototype.toDataURL;
+        const originalTheme = activeTheme();
+        const images = [];
+        HTMLCanvasElement.prototype.toDataURL = function(...args) { const data = originalExport.apply(this, args); images.push(data); return data; };
+        try {
+          paintedIconColors = '';
+          applyTheme(appearanceData.builtins[0]);
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          applyTheme(appearanceData.builtins.find(t => t.id === 'graphite'));
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          let rejected = false;
+          try { await api.updateThemeIcon('data:image/png;base64,AAAA'); } catch { rejected = true; }
+          return { changed: images.length === 2 && images[0] !== images[1], png: images.every(data => data.startsWith('data:image/png;base64,')), rejected, images };
+        } finally {
+          HTMLCanvasElement.prototype.toDataURL = originalExport;
+          paintedIconColors = ''; applyTheme(originalTheme);
+        }
+      })()`);
+      const { images: iconImages, ...iconResults } = iconChecks;
+      assert.ok(Object.values(iconResults).every(Boolean), JSON.stringify(iconResults));
+      for (const data of iconImages) assert.deepEqual(require('electron').nativeImage.createFromDataURL(data).getSize(), { width: 256, height: 256 });
       await execute(`document.getElementById('nav-settings').click()`);
       await waitFor(`!document.getElementById('settings-page').hidden`);
       assert.equal(await execute(`!document.querySelector('header #appearance-open') && !document.getElementById('about-toggle') && document.getElementById('about-panel').closest('#settings-page') !== null && !document.getElementById('about-panel').hidden && document.getElementById('theme-form').closest('#app-settings-form') === null`), true);
@@ -189,7 +214,17 @@ app.on('browser-window-created', (_event, window) => {
       assert.ok(priorityState.items[0].priority > 0);
       assert.equal(await execute(`window.audiority.prioritizeItem('missing-id').then(() => false, () => true)`), true);
       await execute(`document.getElementById('import-folder').click()`);
-      await waitFor(`document.getElementById('import-result').textContent.includes('1 already queued')`);
+      await waitFor(`document.getElementById('import-result').textContent.includes('1 already queued') && !importing`);
+      const overflow = await execute(`(() => {
+        const node = document.querySelector('#queue .name');
+        const original = node.textContent;
+        node.textContent = 'The.Lord.Of.The.Rings.The.Return.Of.The.King.Extended.Edition.2160p.TrueHD.7.1.Atmos.MKV'.repeat(3);
+        const style = getComputedStyle(node);
+        const valid = style.textOverflow === 'ellipsis' && style.whiteSpace === 'nowrap' && node.scrollWidth > node.clientWidth;
+        node.textContent = original;
+        return valid;
+      })()`);
+      assert.equal(overflow, true);
       dialog.showOpenDialog = originalDialog;
       await execute(`document.getElementById('nav-settings').click()`);
       await waitFor(`!document.getElementById('settings-page').hidden && document.querySelectorAll('#theme-presets button').length === 12`);
@@ -237,7 +272,9 @@ app.on('browser-window-created', (_event, window) => {
       let releaseConversion;
       const conversionGate = new Promise(resolve => { releaseConversion = resolve; });
       Engine.prototype.convert = async function (...args) { await conversionGate; return originalConvert.apply(this, args); };
-      await execute(`document.getElementById('nav-queue').click(); document.getElementById('start').click()`);
+      await execute(`document.getElementById('nav-queue').click()`);
+      await waitFor(`!$('start').disabled && currentPage === 'queue'`);
+      await execute(`document.getElementById('start').click()`);
       await waitFor(`running && !$('pause').hidden`);
       await execute(`$('pause').click()`);
       await waitFor(`queuePaused && !pauseRequestPending && $('pause').textContent === 'Resume'`);

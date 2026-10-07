@@ -1,6 +1,6 @@
 {
   "name": "audiority",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Local, channel-safe video audio conversion",
   "author": "Audiority contributors",
   "license": "MIT",
@@ -13,8 +13,8 @@
     "benchmark": "electron scripts/benchmark.js",
     "prepare:tools": "node scripts/prepare-tools.js",
     "pack": "npm run prepare:tools && electron-builder --dir",
-    "dist:mac": "npm run prepare:tools && electron-builder --mac",
-    "dist:win": "npm run prepare:tools && electron-builder --win"
+    "dist:mac": "npm run prepare:tools -- mac && electron-builder --mac --arm64",
+    "dist:win": "npm run prepare:tools -- win && electron-builder --win --x64"
   },
   "dependencies": {
     "ffmpeg-static": "5.3.0",
@@ -26,12 +26,14 @@
   },
   "build": {
     "appId": "app.audiority.desktop",
+    "icon": "build/icon.png",
     "productName": "Audiority",
     "directories": { "output": "dist" },
     "files": ["src/**/*", "package.json", "LICENSE"],
-    "extraResources": [{ "from": "resources/tools", "to": "tools" }],
-    "mac": { "category": "public.app-category.video", "target": ["dmg", "zip"] },
-    "win": { "target": ["nsis", "portable"] },
-    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true }
+    "extraResources": [{ "from": "build/license.txt", "to": "license.txt" }],
+    "mac": { "category": "public.app-category.video", "target": ["dmg"], "extraResources": [{ "from": "legal-tools", "to": "tools", "filter": ["**/*", "!.DS_Store"] }] },
+    "win": { "target": ["nsis"], "extraResources": [{ "from": "legal-tools-win", "to": "tools", "filter": ["**/*", "!.DS_Store"] }] },
+    "dmg": { "license": "build/license.txt" },
+    "nsis": { "oneClick": false, "perMachine": true, "allowToChangeInstallationDirectory": true, "license": "build/license.txt" }
   }
 }

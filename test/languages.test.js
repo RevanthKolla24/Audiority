@@ -53,6 +53,8 @@ test('real language filtering remaps compatibility audio and preserved ASS/font 
     const result = await engine.convert(item, dir, () => {}, undefined, { ...preferencesDefaults(), allowedLanguages: ['jpn', 'eng'], keepDefaultTrack: false });
     const output = await engine.probe(result.output);
     assert.deepEqual(output.streams.filter(s => s.codec_type === 'audio').map(s => s.codec_name), ['flac', 'pcm_s16le']);
+    assert.deepEqual(output.streams.filter(s => s.codec_type === 'audio').map(s => s.disposition.default), [0, 1]);
+    assert.deepEqual(output.streams.filter(s => s.codec_type === 'audio').map(s => s.tags.language), ['jpn', 'jpn']);
     assert.equal(output.streams.filter(s => s.codec_type === 'subtitle').length, 1);
     assert.equal(output.streams.filter(s => s.codec_type === 'subtitle')[0].tags.language, 'eng');
     assert.equal(output.streams.filter(s => s.codec_type === 'attachment').length, 1);

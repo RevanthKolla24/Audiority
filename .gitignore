@@ -1,6 +1,11 @@
 node_modules/
 dist/
 build/
+!build/
+build/*
+!build/icon.png
+!build/license.txt
+resources/
 out/
 
 .DS_Store
@@ -22,3 +27,5 @@ coverage/
 *.dmg
 *.pkg
 *.exe
+!legal-tools-win/ffmpeg.exe
+!legal-tools-win/ffprobe.exe

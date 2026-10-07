@@ -11,6 +11,20 @@ const caps = { dca: { layouts: ['mono', 'stereo', '5.1(side)'], rates: [44100, 4
 const audio = (codec, extra = {}) => ({ index: 0, codec_type: 'audio', codec_name: codec, channels: 6, channel_layout: '5.1(side)', sample_rate: '48000', ...extra });
 const settings = overrides => ({ ...defaultSettings(), receiverId: 'bose-lifestyle-v20', deviceId: 'shield-tv-pro', passthrough: 'enabled', pathConfirmed: true, pathCodecs: ['dts', 'ac3', 'pcm', 'eac3', 'dtshd', 'truehd'], ...overrides });
 
+test('QA: bandwidth restrictions, mono bitrate and missing optional metadata stay safe', () => {
+  for (const connection of ['arc', 'optical']) {
+    const profile = resolveProfile(settings({ connection, advanced: true, allowed: ['pcm', 'ac3'], pathCodecs: ['pcm', 'ac3'] }));
+    const surround = planTrack(audio('pcm_s24le'), caps, profile);
+    assert.notEqual(surround.codec, 'pcm_s24le');
+    assert.ok(!surround.codec?.startsWith('pcm_') || surround.channels === 2);
+    const mono = planTrack(audio('aac', { channels: 1, channel_layout: 'mono' }), caps, profile);
+    assert.equal(mono.bitrate, '192k');
+    assert.doesNotThrow(() => planFile({ streams: [audio('aac'), { index: 1, codec_type: 'subtitle', codec_name: 'ass' }, { index: 2, codec_type: 'attachment' }] }, caps, profile));
+  }
+  const noDts = resolveProfile(settings({ connection: 'optical', pathCodecs: ['pcm', 'ac3'] }));
+  assert.equal(planTrack(audio('flac'), caps, noDts).codec, 'ac3');
+});
+
 test('catalog has unique alphabetical models, verified references, and honest unknowns', () => {
   assert.ok(receivers.length > 100); assert.equal(new Set(receivers.map(r => r.id)).size, receivers.length);
   assert.deepEqual(receivers.map(r => r.name), [...receivers.map(r => r.name)].sort((a, b) => a.localeCompare(b, 'en', { numeric: true })));
