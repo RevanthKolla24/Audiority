@@ -1,0 +1,182 @@
+name: Build and release Audiority
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+# Do not interrupt a release that is already uploading installers.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  mac:
+    name: macOS Apple Silicon
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      AUDIORITY_FFMPEG: ./legal-tools/ffmpeg
+      AUDIORITY_FFPROBE: ./legal-tools/ffprobe
+      GIT_LFS_SKIP_SMUDGE: '1'
+    steps:
+      - name: Checkout source without LFS binaries
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Check release version
+        shell: bash
+        run: |
+          node -e 'const version = require("./package.json").version; if (process.env.GITHUB_REF_NAME !== `v${version}`) throw new Error(`Tag must match package.json: v${version}`);'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download macOS arm64 FFmpeg and FFprobe
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Fail clearly if GitHub changes the architecture behind macos-latest.
+          test "$(uname -m)" = arm64 || { echo 'This job requires an Apple Silicon runner.' >&2; exit 1; }
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          # Replace LFS pointers; never package the checked-in pointer text.
+          rm -rf legal-tools
+          mkdir -p legal-tools
+          for tool in ffmpeg ffprobe; do
+            url="https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/${tool}.zip"
+            curl --fail --location --retry 3 --connect-timeout 30 --max-time 600 \
+              "$url" --output "$work/${tool}.zip"
+            mkdir -p "$work/$tool"
+            unzip -q "$work/${tool}.zip" -d "$work/$tool"
+            binary="$(find "$work/$tool" -type f -name "$tool" -print -quit)"
+            test -n "$binary"
+            cp "$binary" "legal-tools/$tool"
+            chmod +x "legal-tools/$tool"
+          done
+          curl --fail --location --retry 3 --connect-timeout 30 --max-time 120 \
+            https://www.gnu.org/licenses/gpl-3.0.txt --output legal-tools/ffmpeg-license.txt
+          grep -q 'GNU GENERAL PUBLIC LICENSE' legal-tools/ffmpeg-license.txt
+          # Record the downloaded versions/configuration for later source/notice review.
+          # GPL text alone does not fulfill all redistribution obligations.
+          {
+            printf 'Provider: https://ffmpeg.martin-riedl.de/\n'
+            shasum -a 256 legal-tools/ffmpeg legal-tools/ffprobe
+            legal-tools/ffmpeg -version
+            legal-tools/ffprobe -version
+          } > legal-tools/build-info.txt
+
+      - name: Validate downloaded tools
+        run: npm run prepare:tools -- mac
+
+      - name: Run regression tests
+        run: npm test
+
+      - name: Build unsigned macOS installer
+        # Only the upload step publishes; avoid electron-builder's tag auto-publish.
+        run: npm run dist:mac -- --publish never
+
+      - name: Upload DMG to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.dmg
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  windows:
+    name: Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      AUDIORITY_FFMPEG: ./legal-tools-win/ffmpeg.exe
+      AUDIORITY_FFPROBE: ./legal-tools-win/ffprobe.exe
+      GIT_LFS_SKIP_SMUDGE: '1'
+    steps:
+      - name: Checkout source without LFS binaries
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Check release version
+        shell: pwsh
+        run: |
+          node -e 'const version = require("./package.json").version; if (process.env.GITHUB_REF_NAME !== `v${version}`) throw new Error(`Tag must match package.json: v${version}`);'
+          if ($LASTEXITCODE -ne 0) { throw 'Release tag does not match package.json.' }
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download Windows x64 FFmpeg and FFprobe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $work = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString())
+          New-Item -ItemType Directory -Path $work | Out-Null
+          try {
+            $zip = Join-Path $work 'ffmpeg.zip'
+            Invoke-WebRequest -Uri 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile $zip
+            Expand-Archive -Path $zip -DestinationPath (Join-Path $work 'expanded')
+            # Remove LFS pointers before populating target-specific resources.
+            if (Test-Path legal-tools-win) { Remove-Item legal-tools-win -Recurse -Force }
+            New-Item -ItemType Directory -Path legal-tools-win | Out-Null
+            foreach ($tool in @('ffmpeg.exe', 'ffprobe.exe')) {
+              $matches = @(Get-ChildItem (Join-Path $work 'expanded') -Recurse -File -Filter $tool)
+              if ($matches.Count -ne 1) { throw "Expected one $tool in the downloaded archive." }
+              Copy-Item $matches[0].FullName (Join-Path 'legal-tools-win' $tool)
+            }
+            Invoke-WebRequest -Uri 'https://www.gnu.org/licenses/gpl-3.0.txt' -OutFile legal-tools-win/ffmpeg-license.txt
+            if (-not (Select-String -Path legal-tools-win/ffmpeg-license.txt -Pattern 'GNU GENERAL PUBLIC LICENSE' -Quiet)) {
+              throw 'Downloaded license is not GPL text.'
+            }
+            # Preserve provider README/license material as well as the standard GPL text.
+            $notices = Join-Path 'legal-tools-win' 'provider-notices'
+            New-Item -ItemType Directory -Path $notices | Out-Null
+            Get-ChildItem (Join-Path $work 'expanded') -Recurse -File |
+              Where-Object { $_.Name -match '^(LICENSE|COPYING|README)' } |
+              ForEach-Object { Copy-Item $_.FullName (Join-Path $notices $_.Name) }
+            'Provider: https://www.gyan.dev/ffmpeg/builds/' | Set-Content legal-tools-win/build-info.txt
+            Get-FileHash legal-tools-win/ffmpeg.exe, legal-tools-win/ffprobe.exe -Algorithm SHA256 |
+              Format-List | Out-String | Add-Content legal-tools-win/build-info.txt
+            & ./legal-tools-win/ffmpeg.exe -version | Add-Content legal-tools-win/build-info.txt
+            if ($LASTEXITCODE -ne 0) { throw 'FFmpeg did not execute successfully.' }
+            & ./legal-tools-win/ffprobe.exe -version | Add-Content legal-tools-win/build-info.txt
+            if ($LASTEXITCODE -ne 0) { throw 'FFprobe did not execute successfully.' }
+          } finally {
+            Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Validate downloaded tools
+        run: npm run prepare:tools -- win
+
+      - name: Run regression tests
+        run: npm test
+
+      - name: Build unsigned Windows installer
+        run: npm run dist:win -- --publish never
+
+      - name: Upload EXE to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
