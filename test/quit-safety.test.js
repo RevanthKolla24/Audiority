@@ -4,6 +4,18 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
+test('cancel aborts and wakes the runner without prematurely unlocking the queue', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../src/main.js'), 'utf8');
+  const controller = new AbortController();
+  let resumed = 0;
+  const context = vm.createContext({ controller, running: true, resumeQueue: () => resumed++, send: () => assert.fail('Cancellation must not announce idle') });
+  vm.runInContext(source.slice(source.indexOf('function cancelQueue()'), source.indexOf('let importController')), context);
+  vm.runInContext('cancelQueue()', context);
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(resumed, 1);
+  assert.equal(context.running, true);
+});
+
 // Exercise the actual shutdown handler without quitting the test runner.
 test('failed final queue save blocks quit and allows a successful retry', async () => {
   const source = fs.readFileSync(path.join(__dirname, '../src/main.js'), 'utf8');

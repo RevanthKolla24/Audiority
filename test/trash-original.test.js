@@ -25,6 +25,22 @@ test('auto-trash calls the OS only for safe successful outputs and reports failu
     assert.equal(calls.length, 0);
     assert.deepEqual(await trashOriginal(item, result, options), []);
     assert.deepEqual(calls, [file]); calls = [];
+    const sidecars = [{ file: path.join(dir, 'original.eng.srt') }, { file: path.join(dir, 'original.jpn.ass') }];
+    const copied = sidecars.map((_, i) => path.join(dir, `converted-${i}.srt`));
+    for (const sidecar of sidecars) await fs.writeFile(sidecar.file, 'subtitle');
+    const withSubtitles = { ...item, sidecars }, withCopies = { ...result, sidecars: copied };
+    assert.deepEqual(await trashOriginal(withSubtitles, withCopies, options), []);
+    assert.deepEqual(calls, [file, ...sidecars.map(s => s.file)]); calls = [];
+    const partialWarnings = await trashOriginal(withSubtitles, withCopies, { ...options, trashItem: async target => {
+      calls.push(target); if (target === sidecars[0].file) throw new Error('Subtitle locked');
+    } });
+    assert.deepEqual(calls, [file, ...sidecars.map(s => s.file)]); calls = [];
+    assert.match(partialWarnings[0], /Could not move subtitle source.*Subtitle locked/);
+    const aborted = new AbortController();
+    await trashOriginal(withSubtitles, withCopies, { ...options, signal: aborted.signal, trashItem: async target => { calls.push(target); aborted.abort(); } });
+    assert.deepEqual(calls, [file]); calls = [];
+    await trashOriginal(withSubtitles, withCopies, { ...options, trashItem: async target => { calls.push(target); throw new Error('Media locked'); } });
+    assert.deepEqual(calls, [file]); calls = [];
     assert.match((await trashOriginal(item, result, { ...options, signal: AbortSignal.abort() }))[0], /canceled/);
     assert.match((await trashOriginal({ ...item, sidecars: [{}] }, result, options))[0], /subtitles/);
     assert.match((await trashOriginal(item, { ...result, output: file }, options))[0], /same file/);

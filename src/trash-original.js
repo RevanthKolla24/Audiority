@@ -18,7 +18,16 @@ async function trashOriginal(item, result, { enabled, signal, trashItem }) {
     if (await fs.realpath(item.file) === await fs.realpath(result.output) || (source.dev === output.dev && source.ino === output.ino)) throw new Error('Source and output refer to the same file.');
     if (signal?.aborted) return ['Original retained: queue was canceled before moving it to Trash.'];
     await trashItem(path.resolve(item.file));
-    return [];
+    const warnings = [];
+    for (const sidecar of item.sidecars || []) {
+      if (signal?.aborted) {
+        warnings.push('Remaining subtitle sources retained: queue was canceled during Trash cleanup.');
+        break;
+      }
+      try { await trashItem(path.resolve(sidecar.file)); }
+      catch (error) { warnings.push(`Could not move subtitle source to Trash: ${path.basename(sidecar.file)} — ${error.message}`); }
+    }
+    return warnings;
   } catch (error) {
     return [`Could not move original to Trash: ${error.message}`];
   }
