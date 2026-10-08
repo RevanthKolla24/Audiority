@@ -6,6 +6,8 @@
 const { spawn } = require('node:child_process');
 // fs/promises lets disk operations be awaited instead of blocking the Node.js event loop.
 const fs = require('node:fs/promises');
+const { createReadStream } = require('node:fs');
+const { pipeline } = require('node:stream/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { planFile } = require('./policy');
@@ -17,9 +19,8 @@ const { validatePreferences, preferencesDefaults } = require('./app-state');
 function needsForcedSubtitleFlag(stream) {
   return stream.codec_type === 'subtitle' && /\bforced\b/i.test(stream.tags?.title || '') && stream.disposition?.forced !== 1;
 }
-// COPYFILE_EXCL refuses existing destinations but is not atomic publication:
-// the final pathname is visible while copying. Never unlink on copy failure;
-// Node handles its failed copy, and the pathname may belong to someone else.
+// Exclusive streaming refuses existing destinations, but exposes the final name
+// while copying. Only clean up a destination that we successfully created.
 // Accepts a verified temp file and output folder/name; returns destination and whether copying was needed.
 async function publishOutput(temp, directory, basename, { io = fs, signal } = {}) {
   let copyOnly = false;
@@ -38,13 +39,28 @@ async function publishOutput(temp, directory, basename, { io = fs, signal } = {}
       const space = await io.statfs(directory);
       if (space.bavail * space.bsize < size + 64 * 1024 * 1024) throw new Error('Insufficient free space for exclusive-copy publication; this filesystem requires a second full output copy.');
     }
+    let handle, owned;
     try {
-      // EXCL refuses existing destinations. Unlike a link, copying exposes the name before all bytes arrive.
-      await io.copyFile(temp, destination, require('node:fs').constants.COPYFILE_EXCL);
+      handle = await io.open(destination, 'wx');
+      owned = await handle.stat();
+      // pipeline propagates cancellation and drains/closes both streams on error.
+      await pipeline(createReadStream(temp), handle.createWriteStream(), { signal });
       return { destination, copied: true };
     } catch (error) {
-      if (error.code === 'EEXIST') continue;
+      if (!handle && error.code === 'EEXIST') continue;
+      await handle?.close().catch(() => {});
+      if (handle) {
+        try {
+          const current = await io.lstat(destination);
+          // Do not delete a replacement file or symlink installed by another process.
+          if (owned && current.isFile() && current.dev === owned.dev && current.ino === owned.ino) await io.unlink(destination);
+        } catch (cleanupError) {
+          if (cleanupError.code !== 'ENOENT') throw new Error(`Copy failed: ${error.message}. Could not remove incomplete output ${destination}: ${cleanupError.message}`, { cause: error });
+        }
+      }
       throw new Error(`Cannot copy verified output without overwriting: ${error.message}`, { cause: error });
+    } finally {
+      await handle?.close().catch(() => {});
     }
   }
   throw new Error('Could not find an unused output filename.');

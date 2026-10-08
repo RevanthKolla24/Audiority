@@ -7,6 +7,32 @@ const { defaultSettings } = require('../src/profiles');
 const { saveSettings } = require('../src/settings');
 const { emptyLibrary, mutateLibrary, validateLibrary, loadLibrary, saveLibrary } = require('../src/profile-library');
 const settings = () => ({ ...defaultSettings(), receiverId: 'bose-lifestyle-v20' });
+test('library migration keeps in-memory settings if persistence fails', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'audiority-migration-'));
+  try {
+    await saveSettings(directory, settings());
+    const original = fs.writeFile;
+    t.mock.method(fs, 'writeFile', async (file, ...args) => {
+      if (path.basename(file).startsWith('.library-')) throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+      return original(file, ...args);
+    });
+    const result = await loadLibrary(directory);
+    assert.equal(result.library.profiles[0].name, 'My playback setup');
+    assert.match(result.warning, /could not be saved.*disk full/);
+    assert.ok(!(await fs.readdir(directory)).some(name => name.endsWith('.tmp')));
+  } finally { t.mock.restoreAll(); await fs.rm(directory, { recursive: true, force: true }); }
+});
+
+test('profile backup OS errors still block replacement', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'audiority-library-os-'));
+  try {
+    const library = mutateLibrary(emptyLibrary(), { type: 'save', name: 'Room', settings: settings() });
+    await saveLibrary(directory, library);
+    await fs.mkdir(path.join(directory, 'playback-profiles.json.backup'));
+    await assert.rejects(saveLibrary(directory, emptyLibrary()), /backup failed with OS error/);
+    assert.deepEqual((await loadLibrary(directory)).library, library);
+  } finally { await fs.rm(directory, { recursive: true, force: true }); }
+});
 test('create, rename, duplicate, edit, switch and delete independent profiles', () => {
   let library = mutateLibrary(emptyLibrary(), { type: 'save', name: 'Living room', settings: settings() });
   const first = library.activeId;
@@ -40,7 +66,11 @@ test('legacy migration, persistence, backup and corrupt-library protection', asy
     assert.deepEqual(JSON.parse(await fs.readFile(path.join(directory, 'playback-profiles.json.backup'), 'utf8')), migrated);
     await fs.writeFile(path.join(directory, 'playback-profiles.json'), '{broken');
     assert.match((await loadLibrary(directory)).warning, /not been overwritten/);
-    await assert.rejects(saveLibrary(directory, next), /unreadable/);
-    assert.equal(await fs.readFile(path.join(directory, 'playback-profiles.json'), 'utf8'), '{broken');
+    await saveLibrary(directory, next);
+    assert.deepEqual((await loadLibrary(directory)).library, next);
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(directory, 'playback-profiles.json.backup'), 'utf8')), migrated);
+    await fs.writeFile(path.join(directory, 'playback-profiles.json'), '{}');
+    await saveLibrary(directory, next);
+    assert.deepEqual((await loadLibrary(directory)).library, next);
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 });

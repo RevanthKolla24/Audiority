@@ -55,8 +55,20 @@ async function saveLibrary(directory, library) {
   try {
     // Preserve the last valid library as a recovery file before replacement.
     const target = path.join(directory, 'playback-profiles.json');
-    try { validateLibrary(JSON.parse(await fs.readFile(target, 'utf8'))); await fs.copyFile(target, `${target}.backup`); }
-    catch (error) { if (error.code !== 'ENOENT') throw new Error('Existing profile library is unreadable. Back it up and move it aside before saving.'); }
+    let previous;
+    try { previous = await fs.readFile(target, 'utf8'); }
+    catch (error) {
+      if (error.code !== 'ENOENT') throw new Error('Existing profile library is unreadable.', { cause: error });
+    }
+    if (previous !== undefined) {
+      let validPrevious = false;
+      try { validateLibrary(JSON.parse(previous)); validPrevious = true; }
+      catch { /* Corrupt data must not block saving or replace a good backup. */ }
+      if (validPrevious) {
+        try { await fs.writeFile(`${target}.backup`, previous, { mode: 0o600 }); }
+        catch (error) { throw new Error('Profile library backup failed with OS error.', { cause: error }); }
+      }
+    }
     await fs.writeFile(temp, JSON.stringify(validated, null, 2), { mode: 0o600 });
     await fs.rename(temp, target);
   } finally { await fs.unlink(temp).catch(() => {}); }
@@ -66,12 +78,16 @@ async function saveLibrary(directory, library) {
 async function loadLibrary(directory) {
   try { return { library: validateLibrary(JSON.parse(await fs.readFile(path.join(directory, 'playback-profiles.json'), 'utf8'))), warning: '' }; }
   catch (error) {
-    if (error.code !== 'ENOENT') return { library: emptyLibrary(), warning: 'Profile library could not be read. It has not been overwritten; restore the .backup file or move the damaged file aside before saving.' };
+    if (error.code !== 'ENOENT') return { library: emptyLibrary(), warning: 'Profile library could not be read. It has not been overwritten; restore the .backup file to recover profiles. Saving a new valid library can replace damaged data.' };
   }
   const legacy = await loadSettings(directory);
   if (!legacy.settings) return { library: emptyLibrary(), warning: legacy.warning };
   const library = mutateLibrary(emptyLibrary(), { type: 'save', name: 'My playback setup', settings: legacy.settings });
-  await saveLibrary(directory, library);
-  return { library, warning: '' };
+  try {
+    await saveLibrary(directory, library);
+    return { library, warning: '' };
+  } catch (error) {
+    return { library, warning: `Legacy settings migrated, but could not be saved to disk: ${error.message}` };
+  }
 }
 module.exports = { emptyLibrary, validateLibrary, validateName, mutateLibrary, loadLibrary, saveLibrary };

@@ -3,9 +3,44 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { constants } = require('node:fs');
+const { Writable } = require('node:stream');
 const { publishOutput } = require('../src/engine');
 const failure = code => Object.assign(new Error(code), { code });
+
+test('stream publication removes owned partial output on cancellation or write failure', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'audiority-stream-'));
+  try {
+    const temp = path.join(directory, 'input.partial.mkv');
+    await fs.writeFile(temp, Buffer.alloc(1024 * 1024, 1));
+    for (const cancel of [false, true]) {
+      const controller = new AbortController();
+      const base = cancel ? 'cancel' : 'failure';
+      await fs.writeFile(path.join(directory, `${base}.mkv`), 'existing');
+      let writes = 0;
+      const io = { ...fs, link: async () => { throw failure('ENOTSUP'); },
+        open: async (...args) => {
+          const handle = await fs.open(...args);
+          return { stat: () => handle.stat(), close: () => handle.close(),
+            createWriteStream: () => new Writable({
+              write(chunk, _encoding, callback) {
+                handle.write(chunk).then(() => {
+                  writes++;
+                  if (cancel) { controller.abort(); callback(); }
+                  else callback(failure('ENOSPC'));
+                }, callback);
+              }
+            })
+          };
+        }
+      };
+      await assert.rejects(publishOutput(temp, directory, base, { io, signal: controller.signal }), cancel ? /abort/i : /ENOSPC/);
+      assert.ok(writes > 0);
+      assert.equal(await fs.readFile(path.join(directory, `${base}.mkv`), 'utf8'), 'existing');
+      await assert.rejects(fs.access(path.join(directory, `${base} (1).mkv`)), { code: 'ENOENT' });
+      assert.equal((await fs.stat(temp)).size, 1024 * 1024);
+    }
+  } finally { await fs.rm(directory, { recursive: true, force: true }); }
+});
 
 test('publication preserves collisions on hard-link and unsupported-link copy paths', async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'audiority-publish-'));
@@ -31,21 +66,23 @@ test('exclusive copy retries a concurrent collision without unlinking another fi
   const io = {
     link: async () => { throw failure('ENOTSUP'); },
     stat: async () => ({ size: 100 }), statfs: async () => ({ bavail: 1e9, bsize: 1 }),
-    copyFile: async (_temp, destination, flags) => {
-      assert.equal(flags, constants.COPYFILE_EXCL);
+    open: async (destination, flags) => {
+      assert.equal(flags, 'wx');
       if (++calls === 1) throw failure('EEXIST');
       assert.ok(destination.endsWith('episode (1).mkv'));
+      throw failure('EACCES');
     },
     unlink: async () => assert.fail('Must not unlink a competing destination')
   };
-  assert.equal((await publishOutput('/temp', '/output', 'episode', { io })).copied, true);
+  await assert.rejects(publishOutput('/temp', '/output', 'episode', { io }), /EACCES/);
+  assert.equal(calls, 2);
 });
 
 test('publication surfaces copy errors, rejects low space, respects cancellation and does not mask unrelated link errors', async () => {
   const io = {
     link: async () => { throw failure('ENOTSUP'); },
     stat: async () => ({ size: 100 }), statfs: async () => ({ bavail: 1e9, bsize: 1 }),
-    copyFile: async () => { throw failure('EFBIG'); },
+    open: async () => { throw failure('EFBIG'); },
     unlink: async () => assert.fail('No blind cleanup of final path')
   };
   await assert.rejects(publishOutput('/temp', '/output', 'episode', { io }), /EFBIG/);
