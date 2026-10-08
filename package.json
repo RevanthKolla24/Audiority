@@ -1,6 +1,6 @@
 {
   "name": "audiority",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Local, channel-safe video audio conversion",
   "author": "Audiority contributors",
   "license": "MIT",
@@ -29,7 +29,13 @@
     "appId": "app.audiority.desktop",
     "icon": "build/icon.png",
     "productName": "Audiority",
-    "publish": [{ "provider": "github", "owner": "RevanthKolla24", "repo": "Audiority" }],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "RevanthKolla24",
+        "repo": "Audiority"
+      }
+    ],
     "directories": {
       "output": "dist"
     },
