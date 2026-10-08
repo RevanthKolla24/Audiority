@@ -118,8 +118,10 @@ Settings → Automation lets you choose a folder and enable MKV imports. Save
 settings to apply. The app polls recursively every 30 seconds while idle and
 requires two matching size/modification-time observations. A stalled download
 can still appear stable: this is not a guarantee that copying has finished.
-Generated outputs and symbolic links are skipped. Successfully queued paths are
-remembered for the session, even after clearing the queue; failures can retry.
+Generated outputs are skipped. Input symlinks are followed and canonical targets
+are deduplicated; the watch root itself must remain a real directory. Successfully
+queued paths are remembered while present; removed paths are pruned after a
+successful scan, and failures can retry.
 Restarting or changing watch settings resets that memory. Existing queue entries
 remain deduplicated. Imports use the active profile and the usual inspection
 pipeline. Conversions are **not automatically started**. Watching only runs while
@@ -241,7 +243,7 @@ Theme files use version 1, a name, light/dark mode, and the 13 color tokens show
 
 #### Folder imports and anime subtitles
 
-Use **Import folder** or drop a folder onto the import area to recursively discover media, including season subfolders. There is no fixed file-count cap; discovery is cancelable and inspection uses bounded concurrency, while queue memory still limits very large libraries. Overlapping imports are deduplicated. Hidden directory entries, symbolic links, and generated outputs matching the current suffix or standard Audiority/partial filenames are skipped. The output folder itself is not excluded, so importing from the same folder is supported; other unmarked media in that folder is eligible for import. Folder discovery uses a media-extension allowlist; individual file selection can still probe other extensions.
+Use **Import folder** or drop a folder onto the import area to recursively discover media, including season subfolders. There is no fixed file-count cap; discovery is cancelable and inspection uses bounded concurrency, while queue memory still limits very large libraries. Overlapping imports are deduplicated. Hidden directory entries and generated outputs matching the current suffix or standard Audiority/partial filenames are skipped. The output folder itself is not excluded, so importing from the same folder is supported; other unmarked media in that folder is eligible for import. Folder discovery uses a media-extension allowlist; individual file selection can still probe other extensions.
 
 The output preserves the selected root folder and its season paths. For example, importing `Anime/Season 01/Episode 01.mkv` from the `Anime` folder writes `Converted/Anime/Season 01/Episode 01.audiority.mkv`. Already compatible files are skipped rather than copied, so the destination is not necessarily a complete duplicate of the show.
 
@@ -358,3 +360,11 @@ Validation checks native executable headers and rejects embedded `--enable-nonfr
 - `src/ui/onboarding.js`: searchable receiver selector, custom rules, playback setup and saved-profile navigation.
 - `src/ui/appearance.js`: theme selection, live editing and import/export controls.
 - `scripts/prepare-tools.js`: in-place target-specific tool validation and distribution gate.
+
+### Symlinked inputs and dialogue boost
+
+Input file and directory symlinks are followed, including targets outside the selected folder. Canonical paths prevent repeated traversal of directory cycles and duplicate targets within a scan; broken or unresolvable links are skipped with warnings. Generated-output checks cover both the link name and target name. Output subfolder symlinks remain prohibited. Sidecar matching still uses imported directory entries; symlinked subtitle sidecars are not automatically followed.
+
+**Auto-Trash acts on the resolved media target, not the symbolic link.** Disable Auto-Trash if that target is shared with another library or application.
+
+Dialogue boost recognizes `7.1`, `7.1(wide)`, and `7.1(wide-side)` sources when a matching downmix rule explicitly permits conversion to 5.1. It still requires the boost setting, affects only the center channel, and may clip loud peaks. It does not automatically authorize new downmix rules.

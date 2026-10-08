@@ -42,7 +42,7 @@ test('recursive folder discovery: sidecars, season structure, duplicates, symlin
     assert.equal(result.length,2); assert.equal(result[0].relativeDirectory,path.join('Anime','Season 01'));
     assert.equal(result[0].sidecars[0].suffix,'.eng.forced.ass');
     assert.ok(result[0].warnings.some(w => /External fonts/.test(w)));
-    assert.ok(warnings.some(w => /symbolic link/.test(w))); assert.ok(!warnings.some(w => /output folder/.test(w)));
+    assert.ok(!warnings.some(w => /symbolic link/.test(w))); assert.ok(!warnings.some(w => /output folder/.test(w)));
     assert.ok(progress.length);
     const cancelled = new AbortController(); cancelled.abort();
     await assert.rejects(collect(discoverMedia([root], { signal:cancelled.signal })), /Cancelled/);

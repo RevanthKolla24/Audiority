@@ -20,19 +20,21 @@ test('dialogue boost defaults off, validates booleans and resolves into profiles
   assert.equal(validatePreferences({ ...preferencesDefaults(), dialogueBoost: true }).dialogueBoost, true);
 });
 
-test('FLAC 7.1 compatibility output defaults correctly and boosts only center', { timeout: 60000 }, async () => {
+for (const layout of ['7.1', '7.1(wide)', '7.1(wide-side)']) {
+test(`FLAC ${layout} compatibility output defaults correctly and boosts only center`, { timeout: 60000 }, async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'audiority-dialogue-'));
   try {
     const tools = toolPaths(), engine = new Engine(tools); await engine.initialize();
     const input = path.join(directory, 'flac.mkv');
     // Low-amplitude tones provide headroom to measure gain without clipping.
     const expressions = Array.from({ length: 8 }, (_, i) => `0.02*sin(2*PI*${300 + i * 100}*t)`).join('|');
-    await run(tools.ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', `aevalsrc=${expressions}:s=48000:c=7.1`, '-t', '1', '-c:a', 'flac', '-disposition:a:0', '0', input]);
-    const settings = { ...defaultSettings(), advanced: true, allowed: ['ac3'], pathConfirmed: true, pathCodecs: ['ac3'], passthrough: 'enabled', allowDownmix: true, keepOriginal: true };
+    await run(tools.ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', `aevalsrc=${expressions}:s=48000:c=${layout}`, '-t', '1', '-c:a', 'flac', '-disposition:a:0', '0', input]);
+    const settings = { ...defaultSettings(), advanced: true, allowed: ['ac3'], pathConfirmed: true, pathCodecs: ['ac3'], passthrough: 'enabled', allowDownmix: true, downmixRules: [{ source: layout, target: '5.1(side)' }], keepOriginal: true };
     const outputs = [];
     for (const boost of [false, true]) {
       engine.setProfile(resolveProfile(settings));
       const item = await engine.inspect(input);
+      assert.equal(item.plan.tracks[0].sourceLayout, layout);
       const result = await engine.convert(item, directory, { preferences: { ...preferencesDefaults(), dialogueBoost: boost } });
       const audio = (await engine.probe(result.output)).streams.filter(s => s.codec_type === 'audio');
       assert.deepEqual(audio.map(s => s.codec_name), ['flac', 'ac3']);
@@ -58,3 +60,4 @@ test('FLAC 7.1 compatibility output defaults correctly and boosts only center', 
     assert.equal(audio[0].disposition.default, 1);
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 });
+}

@@ -4,7 +4,8 @@
  * Learning note: async functions return Promises; await gets their result and try/catch handles failure.
  */
 const fs = require('node:fs/promises');
-// lstat describes a link itself; stat follows it. Checking links helps avoid loops/path escapes.
+// stat follows input symlinks; canonical paths deduplicate targets and directory loops.
+// Output-directory checks below still use lstat to reject destination symlinks.
 const path = require('node:path');
 
 const mediaExtensions = new Set('.mkv .mp4 .m4v .mov .avi .webm .ts .mts .m2ts .mpg .mpeg .vob .ogv .wmv .flv .mxf .flac .wav .wave .mp3 .aac .m4a .ogg .opus .aiff .aif .ac3 .eac3 .dts .mka .wma .ape .alac'.split(' '));
@@ -74,13 +75,14 @@ async function* discoverMedia(paths, { outputDirectory = '', outputSuffix = '.au
   async function* visit(file, root, explicit = false, siblings = null, sidecarIndex = null) {
     cancelled(); visited++; progress();
     let stat;
-    try { stat = await fs.lstat(file); }
+    try { stat = await fs.stat(file); }
     catch (error) { skipped++; onWarning(`Cannot read ${file}: ${error.message}`); return; }
-    if (stat.isSymbolicLink()) { skipped++; onWarning(`Skipped symbolic link: ${file}`); return; }
-    const real = await fs.realpath(file).catch(() => file);
+    let real;
+    try { real = await fs.realpath(file); }
+    catch (error) { skipped++; onWarning(`Cannot resolve ${file}: ${error.message}`); return; }
     if (seen.has(key(real))) { skipped++; return; }
     seen.add(key(real));
-    if (generated(file)) { skipped++; return; }
+    if (generated(file) || generated(real)) { skipped++; return; }
     if (stat.isDirectory()) {
       let entries;
       try { entries = await fs.readdir(file, { withFileTypes: true }); }

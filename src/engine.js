@@ -302,7 +302,7 @@ class Engine {
       if (track.downmix) filters.push(`aresample=out_chlayout=${track.layout}:rematrix_maxval=1`);
       // Boost only the remixed 7.1 -> 5.1 center, not all dialogue or all channels.
       // Gain needs headroom: 1.5x may clip loud center peaks; normalization is separate.
-      if (track.downmix && track.sourceLayout === '7.1' && ['5.1', '5.1(side)'].includes(track.layout) &&
+      if (track.downmix && track.sourceLayout?.startsWith('7.1') && ['5.1', '5.1(side)'].includes(track.layout) &&
           (preferences.dialogueBoost || this.profile?.dialogueBoost || this.profile?.settings?.dialogueBoost)) {
         const surround = track.layout === '5.1(side)' ? ['SL', 'SR'] : ['BL', 'BR'];
         filters.push(`pan=${track.layout}|FL=FL|FR=FR|FC=1.5*FC|LFE=LFE|${surround[0]}=${surround[0]}|${surround[1]}=${surround[1]}`);
