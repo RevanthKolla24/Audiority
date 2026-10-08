@@ -29,6 +29,15 @@ test('watch scans wait for stable MKVs, skip outputs, deduplicate and reset', as
     assert.deepEqual(await watch.scan(folder, options), [file]);
     watch.mark([file]);
     assert.deepEqual(await watch.scan(folder, options), []);
+    assert.equal(watch.processedWatchFiles.size, 1);
+    await assert.rejects(watch.scan(path.join(folder, 'missing')));
+    assert.equal(watch.processedWatchFiles.size, 1);
+    await fs.unlink(file);
+    assert.deepEqual(await watch.scan(folder, options), []);
+    assert.equal(watch.processedWatchFiles.size, 0);
+    await fs.writeFile(file, 'returned');
+    assert.deepEqual(await watch.scan(folder, options), []);
+    assert.deepEqual(await watch.scan(folder, options), [file]);
     watch.reset();
     assert.deepEqual(await watch.scan(folder, options), []);
     assert.deepEqual(await watch.scan(folder, options), [file]);

@@ -183,10 +183,10 @@ app.whenReady().then(async () => {
     for (const message of recoveryWarnings) send('queue-warning', { message });
   });
   window.on('close', event => {
-    if (!running && !importing) return;
-    const choice = dialog.showMessageBoxSync(window, { type: 'question', buttons: ['Keep working', 'Cancel and quit'], defaultId: 0, cancelId: 0, message: importing ? 'A folder/file import is in progress.' : 'A conversion is in progress.' });
+    // Keep the window alive until before-quit has successfully saved the queue.
+    if (queueQuitReady) return;
     event.preventDefault();
-    if (choice === 1) { cancelQueue(); importController?.abort(); const wait = setInterval(() => { if (!running && !importing) { clearInterval(wait); window.destroy(); app.quit(); } }, 100); }
+    if (!queueQuitPending) app.quit();
   });
   handle('pick-files', async () => {
     const selection = await dialog.showOpenDialog(window, { properties: ['openFile', 'multiSelections'], title: 'Import video or audio files' });
@@ -413,12 +413,22 @@ app.on('before-quit', event => {
     if (choice !== 1) return;
   }
   queueQuitPending = true;
-  stopUpdates();
   watchStopping = true; clearInterval(watchTimer);
   cancelQueue(); importController?.abort();
   (async () => {
     while (running || importing || watchBusy) await new Promise(resolve => setTimeout(resolve, 50));
-    await queueWrites; queueQuitReady = true; app.quit();
+    try {
+      // queueWrites handles errors for autosaves; force a new save that rejects.
+      await persistQueue(true);
+      stopUpdates();
+      queueQuitReady = true;
+      app.quit();
+    } catch (error) {
+      queueQuitPending = false;
+      watchStopping = false;
+      watchTimer = setInterval(() => { void pollWatchFolder(); }, 30000);
+      dialog.showMessageBoxSync({ type: 'error', message: 'Queue Save Failed', detail: 'Could not save your queue before quitting! Check your disk space or permissions.\n\nError: ' + error.message });
+    }
   })();
 });
 app.on('window-all-closed', () => app.quit());

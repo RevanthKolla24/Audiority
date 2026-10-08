@@ -23,6 +23,10 @@ class WatchFolder {
       if (info.size > 0 && this.previous.get(key) === stamp && !this.processedWatchFiles.has(key)) ready.push(candidate.file);
     }
     this.previous = current;
+    // Forget removed files after a successful scan; a failed scan keeps history.
+    for (const key of this.processedWatchFiles) {
+      if (!this.previous.has(key)) this.processedWatchFiles.delete(key);
+    }
     return ready;
   }
   // Mark only files that actually reached the queue, not failed inspections.

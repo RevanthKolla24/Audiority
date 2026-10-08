@@ -175,7 +175,8 @@ async function cleanupOrphanedTempFiles(outputDirectories, { io = fs } = {}) {
       for (const entry of entries) {
         if (entry.isSymbolicLink()) continue;
         const file = path.join(normalized, entry.name);
-        if (entry.isDirectory()) { await walk(file); continue; }
+        // Only scan explicitly supplied destinations, never an entire folder tree.
+        if (entry.isDirectory()) continue;
         if (!entry.isFile() || !/^\..+\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.partial\.mkv$/i.test(entry.name)) continue;
         try {
           const current = await io.lstat(file);
