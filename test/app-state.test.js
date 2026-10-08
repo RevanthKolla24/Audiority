@@ -24,8 +24,34 @@ test('preferences validate, whitelist values, remember folders and survive stora
     assert.ok((await fs.readFile(path.join(directory, 'app-settings.json.bak'), 'utf8')).includes('compact'));
     await fs.writeFile(path.join(directory, 'app-settings.json'), 'broken');
     assert.ok((await loadState(directory, 'app-settings.json', preferencesDefaults, validatePreferences)).warning);
-    await assert.rejects(saveState(directory, 'app-settings.json', preferences, validatePreferences));
+    const backup = await fs.readFile(path.join(directory, 'app-settings.json.bak'), 'utf8');
+    await saveState(directory, 'app-settings.json', preferences, validatePreferences);
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(directory, 'app-settings.json'), 'utf8')), preferences);
+    assert.equal(await fs.readFile(path.join(directory, 'app-settings.json.bak'), 'utf8'), backup);
+    await fs.writeFile(path.join(directory, 'app-settings.json'), 'broken');
     await saveState(directory, 'app-settings.json', preferences, validatePreferences, { reset: true });
+    assert.equal(await fs.readFile(path.join(directory, 'app-settings.json.bak'), 'utf8'), backup);
+  } finally { await fs.rm(directory, { recursive: true, force: true }); }
+});
+
+test('saveState replaces invalid schemas but rejects new invalid data and filesystem failures', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'audiority-save-recovery-'));
+  const target = path.join(directory, 'state.json');
+  const validate = value => { if (value?.ok !== true) throw new Error('Unsupported saved data'); return value; };
+  try {
+    await fs.writeFile(target, '{"ok":false}');
+    await fs.writeFile(`${target}.bak`, '{"ok":true,"backup":true}');
+    await assert.rejects(saveState(directory, 'state.json', { ok: false }, validate), /Unsupported/);
+    assert.equal(await fs.readFile(target, 'utf8'), '{"ok":false}');
+    await saveState(directory, 'state.json', { ok: true }, validate);
+    assert.equal(await fs.readFile(`${target}.bak`, 'utf8'), '{"ok":true,"backup":true}');
+    // A directory in place of the backup reliably causes an OS failure, even as root.
+    await fs.unlink(`${target}.bak`); await fs.mkdir(`${target}.bak`);
+    await assert.rejects(saveState(directory, 'state.json', { ok: true, changed: true }, validate), /backup failed with OS error/);
+    assert.deepEqual(JSON.parse(await fs.readFile(target, 'utf8')), { ok: true });
+    await fs.unlink(target); await fs.mkdir(target);
+    await assert.rejects(saveState(directory, 'state.json', { ok: true }, validate), /previous file unreadable/);
+    assert.ok(!(await fs.readdir(directory)).some(name => name.endsWith('.tmp')));
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 });
 

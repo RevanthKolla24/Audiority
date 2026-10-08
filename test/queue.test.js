@@ -24,7 +24,7 @@ test('dynamic priority selects newest first, preserves retries and never repeats
   assert.equal(nextQueueItem(items, new Set()), c);
 });
 
-test('queue round trips, filters completed only when requested, and refuses corrupt storage', async () => {
+test('queue round trips, filters completed only when requested, and replaces corrupt storage', async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'audiority-queue-'));
   try {
     const ready = { id: 'one', file: path.join(directory, 'one.mkv'), status: 'Ready', relativeDirectory: 'Show/Season 01', priority: 123456 };
@@ -39,8 +39,8 @@ test('queue round trips, filters completed only when requested, and refuses corr
     assert.throws(() => validateQueue({ version: 1, items: [ready, ready] }));
     await fs.writeFile(path.join(directory, 'queue.json'), 'broken');
     assert.ok((await loadQueue(directory)).warning);
-    await assert.rejects(saveQueue(directory, new Map()));
-    assert.equal(await fs.readFile(path.join(directory, 'queue.json'), 'utf8'), 'broken');
+    await saveQueue(directory, new Map());
+    assert.deepEqual((await loadQueue(directory)).state.items, []);
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 });
 

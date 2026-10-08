@@ -96,8 +96,22 @@ async function loadState(directory, name, defaults, validate) {
 async function saveState(directory, name, state, validate, { reset = false } = {}) {
   const next = validate(state); await fs.mkdir(directory, { recursive: true });
   const target = path.join(directory, name);
-  try { const previous = await fs.readFile(target, 'utf8'); if (!reset) validate(JSON.parse(previous)); await fs.writeFile(`${target}.bak`, previous, { mode: 0o600 }); }
-  catch (error) { if (error.code !== 'ENOENT') throw new Error(`Cannot save ${name}: previous file unreadable or backup failed.`); }
+  let previous;
+  try { previous = await fs.readFile(target, 'utf8'); }
+  catch (error) {
+    if (error.code !== 'ENOENT') throw new Error(`Cannot save ${name}: previous file unreadable.`, { cause: error });
+  }
+  if (previous !== undefined) {
+    // Only data parsing/validation may fail softly. Never replace a good backup
+    // with corrupt text, even during reset. New state was validated above.
+    let validPrevious = false;
+    try { validate(JSON.parse(previous)); validPrevious = true; }
+    catch { /* Invalid old state must not prevent saving a valid replacement. */ }
+    if (validPrevious) {
+      try { await fs.writeFile(`${target}.bak`, previous, { mode: 0o600 }); }
+      catch (error) { throw new Error(`Cannot save ${name}: backup failed with OS error.`, { cause: error }); }
+    }
+  }
   const temp = `${target}.${crypto.randomUUID()}.tmp`;
   try { await fs.writeFile(temp, JSON.stringify(next, null, 2), { mode: 0o600 }); await fs.rename(temp, target); }
   finally { await fs.unlink(temp).catch(() => {}); }
