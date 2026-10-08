@@ -8,7 +8,8 @@ const { build, scripts } = require('../package.json');
 test('installer targets use explicit agreements and bundle prepared tools', async () => {
   const { validateConfiguration } = require('app-builder-lib/out/util/config/config');
   await validateConfiguration(build, { add() {} });
-  assert.deepEqual(build.mac.target, ['dmg']);
+  assert.deepEqual(build.mac.target, ['dmg', 'zip']);
+  assert.deepEqual(build.publish, [{ provider: 'github', owner: 'RevanthKolla24', repo: 'Audiority' }]);
   assert.deepEqual(build.win.target, ['nsis']);
   assert.equal(build.nsis.perMachine, true);
   assert.equal(build.nsis.oneClick, false);

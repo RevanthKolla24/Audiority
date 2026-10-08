@@ -17,6 +17,7 @@
     "dist:win": "npm run prepare:tools -- win && electron-builder --win --x64"
   },
   "dependencies": {
+    "electron-updater": "6.8.9",
     "ffmpeg-static": "5.3.0",
     "ffprobe-static": "3.1.0"
   },
@@ -28,12 +29,61 @@
     "appId": "app.audiority.desktop",
     "icon": "build/icon.png",
     "productName": "Audiority",
-    "directories": { "output": "dist" },
-    "files": ["src/**/*", "package.json", "LICENSE"],
-    "extraResources": [{ "from": "build/license.txt", "to": "license.txt" }],
-    "mac": { "category": "public.app-category.video", "target": ["dmg"], "extraResources": [{ "from": "legal-tools", "to": "tools", "filter": ["**/*", "!.DS_Store"] }] },
-    "win": { "target": ["nsis"], "extraResources": [{ "from": "legal-tools-win", "to": "tools", "filter": ["**/*", "!.DS_Store"] }] },
-    "dmg": { "license": "build/license.txt" },
-    "nsis": { "oneClick": false, "perMachine": true, "allowToChangeInstallationDirectory": true, "license": "build/license.txt" }
+    "publish": [{ "provider": "github", "owner": "RevanthKolla24", "repo": "Audiority" }],
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "package.json",
+      "LICENSE"
+    ],
+    "extraResources": [
+      {
+        "from": "build/license.txt",
+        "to": "license.txt"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.video",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "extraResources": [
+        {
+          "from": "legal-tools",
+          "to": "tools",
+          "filter": [
+            "**/*",
+            "!.DS_Store"
+          ]
+        }
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "extraResources": [
+        {
+          "from": "legal-tools-win",
+          "to": "tools",
+          "filter": [
+            "**/*",
+            "!.DS_Store"
+          ]
+        }
+      ]
+    },
+    "dmg": {
+      "license": "build/license.txt"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowToChangeInstallationDirectory": true,
+      "license": "build/license.txt"
+    }
   }
 }

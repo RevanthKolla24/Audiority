@@ -26,6 +26,23 @@ Video is copied without re-encoding. Outputs are new MKV files; sources stay in 
 
 ## 📥 Installation
 
+### Updates
+
+Packaged applications check GitHub Releases at startup. Windows downloads newer
+installers in the background and offers **Install and restart** once work is idle.
+Installation saves the queue first and may request administrator permission.
+Choose **Later** to continue without installing; ordinary quits do not install updates.
+
+Unsigned macOS builds check for new versions but do not download or install them
+automatically. Their prompt opens the official release page for a manual download.
+Development runs (`npm start`) do not check for updates. Existing releases without
+this feature require one manual upgrade to a build that includes it.
+
+Update checks contact GitHub and its download infrastructure; this is network
+activity, not conversion telemetry. Conversions still run locally. CI publishes
+the macOS ZIP and `latest-mac.yml`, and Windows installer, blockmap and `latest.yml`.
+Future signed macOS auto-installation requires a separate implementation change.
+
 Use the installer supplied by the project maintainer. A public download URL is not configured here yet; generated installers are available in `dist/` for local builds.
 
 | Platform | Installer | Architecture |

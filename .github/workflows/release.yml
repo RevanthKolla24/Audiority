@@ -87,10 +87,14 @@ jobs:
         # Only the upload step publishes; avoid electron-builder's tag auto-publish.
         run: npm run dist:mac -- --publish never
 
-      - name: Upload DMG to GitHub Release
+      - name: Upload macOS installers and update metadata
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.dmg
+          files: |
+            dist/*.dmg
+            dist/*.zip
+            dist/latest-mac.yml
+          generate_release_notes: true
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -173,10 +177,14 @@ jobs:
       - name: Build unsigned Windows installer
         run: npm run dist:win -- --publish never
 
-      - name: Upload EXE to GitHub Release
+      - name: Upload Windows installer and update metadata
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.exe
+          files: |
+            dist/*.exe
+            dist/latest.yml
+            dist/*.exe.blockmap
+          generate_release_notes: true
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

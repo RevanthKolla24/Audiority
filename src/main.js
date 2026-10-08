@@ -4,6 +4,9 @@
  * Learning note: async functions return Promises; await gets their result and try/catch handles failure.
  */
 const { app, BrowserWindow, ipcMain, dialog, shell, powerSaveBlocker, nativeImage } = require('electron');
+const { autoUpdater } = require('electron-updater');
+const { startUpdates } = require('./updates');
+let stopUpdates = () => {};
 // Only the owning instance may sweep temporary outputs or write queue state.
 const ownsInstance = app.requestSingleInstanceLock();
 if (!ownsInstance) app.exit(0);
@@ -381,6 +384,23 @@ app.whenReady().then(async () => {
     } finally { resumeQueue(); if (sleepBlocker !== null) powerSaveBlocker.stop(sleepBlocker); await persistQueue(); running = false; controller = null; send('running', { value: false }); }
   });
   window.loadFile(page);
+  stopUpdates = startUpdates({ app, updater: autoUpdater, dialog, shell,
+    isBusy: () => running || importing || watchBusy || profileBusy || appStateBusy || queueQuitPending,
+    prepareInstall: async () => {
+      if (running || importing || watchBusy || profileBusy || appStateBusy || queueQuitPending) return false;
+      queueQuitPending = true;
+      watchStopping = true; clearInterval(watchTimer);
+      try { await persistQueue(true); await queueWrites; }
+      catch (error) {
+        queueQuitPending = false; watchStopping = false;
+        watchTimer = setInterval(() => { void pollWatchFolder(); }, 30000);
+        throw error;
+      }
+      queueQuitReady = true;
+      stopUpdates();
+      return true;
+    }
+  });
   watchTimer = setInterval(() => { void pollWatchFolder(); }, 30000);
 });
 let queueQuitReady = false, queueQuitPending = false;
@@ -393,6 +413,7 @@ app.on('before-quit', event => {
     if (choice !== 1) return;
   }
   queueQuitPending = true;
+  stopUpdates();
   watchStopping = true; clearInterval(watchTimer);
   cancelQueue(); importController?.abort();
   (async () => {
