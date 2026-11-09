@@ -8,6 +8,7 @@ const fs = require('node:fs/promises');
 // Promise-based filesystem calls allow the UI/process event loop to keep handling other work.
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { sameSource, validateIdentity } = require('./source-safety');
 
 const preferencesDefaults = () => ({ version: 1, watchFolder: "", watchEnabled: false, trashOriginals: false, allowedLanguages: [], keepDefaultTrack: true, keepOriginal: false, normalizeVolume: false, dialogueBoost: false, clearCompletedOnRestart: false, rememberOutput: true, outputDirectory: '', preserveFolders: true, outputSuffix: '.audiority', threads: 0, inspectionConcurrency: 2, preventSleep: true, compact: false, reducedMotion: false, statsEnabled: true, storeFilenames: false });
 // Validate preferences: receives value. Returns checked data or throws; do not trust saved/input JSON blindly.
@@ -143,14 +144,19 @@ function validateQueue(value) {
     for (const key of ['output', 'temporaryOutput']) if (item[key] && !path.isAbsolute(item[key])) throw new Error('Invalid queue output path.');
     if (item.relativeDirectory && (path.isAbsolute(item.relativeDirectory) || item.relativeDirectory.split(/[\\/]/).includes('..'))) throw new Error('Invalid queue folder.');
     if (item.sidecars && (!Array.isArray(item.sidecars) || item.sidecars.some(s => !path.isAbsolute(s.file || '') || typeof s.suffix !== 'string' || /[\\/]/.test(s.suffix)))) throw new Error('Invalid queue subtitles.');
-    return { id: item.id, file: item.file, status: item.status, ...(item.priority !== undefined ? { priority: item.priority } : {}), output: item.output || '', temporaryOutput: item.temporaryOutput || '', relativeDirectory: item.relativeDirectory || '', sidecars: item.sidecars || [], importWarnings: (item.importWarnings || []).filter(w => typeof w === 'string'), error: typeof item.error === 'string' ? item.error : '' };
+    const outputSnapshot = item.outputSnapshot === undefined ? undefined : validateIdentity(item.outputSnapshot);
+    if (item.persistencePending !== undefined && typeof item.persistencePending !== 'boolean') throw new Error('Invalid queue persistence state.');
+    for (const key of ['publicationPending', 'outputUnavailable']) if (item[key] !== undefined && typeof item[key] !== 'boolean') throw new Error('Invalid queue recovery state.');
+    if (item.persistenceWarning !== undefined && typeof item.persistenceWarning !== 'string') throw new Error('Invalid persistence warning.');
+    if (item.warnings !== undefined && (!Array.isArray(item.warnings) || item.warnings.some(w => typeof w !== 'string'))) throw new Error('Invalid queue warnings.');
+    return { id: item.id, file: item.file, status: item.status, publicationPending: !!item.publicationPending, outputUnavailable: !!item.outputUnavailable, persistenceWarning: item.persistenceWarning || '', ...(item.warnings !== undefined ? { warnings: item.warnings } : {}), ...(item.persistencePending !== undefined ? { persistencePending: item.persistencePending } : {}), ...(outputSnapshot ? { outputSnapshot } : {}), ...(item.priority !== undefined ? { priority: item.priority } : {}), output: item.output || '', temporaryOutput: item.temporaryOutput || '', relativeDirectory: item.relativeDirectory || '', sidecars: item.sidecars || [], importWarnings: (item.importWarnings || []).filter(w => typeof w === 'string'), error: typeof item.error === 'string' ? item.error : '' };
   });
   return { version: 1, items: result };
 }
 // Load queue: receives directory, { clearCompletedOnRestart = false } = {}. Returns loaded state plus recovery/default information.
 async function loadQueue(directory, { clearCompletedOnRestart = false } = {}) {
   const loaded = await loadState(directory, 'queue.json', queueDefaults, validateQueue);
-  if (clearCompletedOnRestart) loaded.state.items = loaded.state.items.filter(item => item.status !== 'Complete');
+  if (clearCompletedOnRestart) loaded.state.items = loaded.state.items.filter(item => item.status !== 'Complete' || item.persistencePending || item.publicationPending || item.outputUnavailable);
   return loaded;
 }
 // Save queue: receives directory, itemsMap. Completes after validated data has been written; failures reject the Promise.
@@ -158,6 +164,45 @@ async function saveQueue(directory, itemsMap) {
   return saveState(directory, 'queue.json', { version: 1, items: [...itemsMap.values()] }, validateQueue);
 }
 // Accepts recovered jobs; removes only recorded validated partial files and returns cleanup warnings.
+async function removeRecoveryTemp(file, items, io = fs) {
+  // A temp-looking name is not ownership proof. Protect every recovered job's
+  // inputs and published path, including paths referenced by a different job.
+  const candidate = path.resolve(file);
+  for (const item of items) {
+    const protectedPaths = [item.file, item.output, ...(item.sidecars || []).map(sidecar => sidecar.file)];
+    if (protectedPaths.some(protectedPath => protectedPath && path.resolve(protectedPath) === candidate)) return false;
+  }
+  const current = await io.lstat(file);
+  if (!current.isFile() || current.isSymbolicLink()) return false;
+  const linked = [];
+  for (const item of items) {
+    if (!item.output) continue;
+    let output;
+    try { output = await io.lstat(item.output); }
+    catch (error) {
+      if (error.code === 'ENOENT') continue;
+      // An inaccessible output cannot be this alias when its saved inode or
+      // device differs. Unknown or potentially matching identities stay guarded.
+      const snapshot = item.outputSnapshot;
+      if (snapshot && (snapshot.dev !== current.dev || snapshot.ino !== current.ino)) continue;
+      throw error;
+    }
+    if (output.dev !== current.dev || output.ino !== current.ino) continue;
+    // Do not refresh away evidence that the output changed before our cleanup.
+    if (!output.isFile() || output.isSymbolicLink() || !sameSource(item.outputSnapshot, output)) return false;
+    linked.push({ item, before: output });
+  }
+  await io.unlink(file);
+  for (const { item, before } of linked) {
+    const after = await io.lstat(item.output);
+    // Unlinking our alias changes ctime, not bytes, mtime or inode identity.
+    if (after.isFile() && !after.isSymbolicLink() && ['dev', 'ino', 'size', 'mtimeMs'].every(key => before[key] === after[key])) {
+      item.outputSnapshot = validateIdentity(after);
+    }
+  }
+  return true;
+}
+
 async function cleanupInterrupted(items) {
   const warnings = [];
   for (const item of items) {
@@ -165,7 +210,7 @@ async function cleanupInterrupted(items) {
     const temp = item.temporaryOutput;
     // Delete only the exact recorded application partial, never a directory or symlink.
     if (!/^\..+\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.partial\.mkv$/i.test(path.basename(temp)) || temp === item.file || temp === item.output) continue;
-    try { const stat = await fs.lstat(temp); if (stat.isFile() && !stat.isSymbolicLink()) await fs.unlink(temp); }
+    try { await removeRecoveryTemp(temp, items); }
     catch (error) { if (error.code !== 'ENOENT') warnings.push(`Could not remove interrupted output: ${error.message}`); }
   }
   return warnings;
@@ -173,7 +218,7 @@ async function cleanupInterrupted(items) {
 // Scan known output roots once at startup, including preserved season folders.
 // Only our hidden UUID-named partials qualify; never follow directory/file symlinks.
 // Returns a deletion count; missing, disconnected or locked paths are harmless.
-async function cleanupOrphanedTempFiles(outputDirectories, { io = fs } = {}) {
+async function cleanupOrphanedTempFiles(outputDirectories, { io = fs, items = [] } = {}) {
   const roots = Array.isArray(outputDirectories) ? outputDirectories : [outputDirectories];
   const visited = new Set();
   let removed = 0;
@@ -191,10 +236,9 @@ async function cleanupOrphanedTempFiles(outputDirectories, { io = fs } = {}) {
         const file = path.join(normalized, entry.name);
         // Only scan explicitly supplied destinations, never an entire folder tree.
         if (entry.isDirectory()) continue;
-        if (!entry.isFile() || !/^\..+\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.partial\.mkv$/i.test(entry.name)) continue;
+        if (!entry.isFile() || !/^(?:\..+\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.partial\.mkv|\.subtitle-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp)$/i.test(entry.name)) continue;
         try {
-          const current = await io.lstat(file);
-          if (current.isFile() && !current.isSymbolicLink()) { await io.unlink(file); removed++; }
+          if (await removeRecoveryTemp(file, items, io)) removed++;
         } catch { /* A locked or already removed file must not block startup. */ }
       }
     } catch { /* Missing/unavailable output directories need no user prompt. */ }

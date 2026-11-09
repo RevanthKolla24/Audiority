@@ -58,6 +58,40 @@ test('real FFmpeg: mixed surround/stereo, metadata, subtitles, copy safety and c
     assert.deepEqual(await fs.readFile(input), original);
     const second = await engine.convert(item, directory);
     assert.notEqual(second.output, result.output);
+    // A locked private hard-link name must not hide successful media publication.
+    const unlink = fs.unlink;
+    let lockedTemp, notified;
+    fs.unlink = async file => {
+      if (String(file).endsWith('.partial.mkv')) {
+        lockedTemp = file;
+        throw Object.assign(new Error('Temporary file locked'), { code: 'EACCES' });
+      }
+      return unlink(file);
+    };
+    try {
+      const locked = await engine.convert(item, directory, { onPublished: async record => { notified = record; } });
+      assert.equal(locked.output, notified.output);
+      assert.match(locked.warnings.join(' '), /Media published and verified.*cleanup failed/);
+      assert.equal(await require('../src/source-safety').validOutput(locked.output, locked.outputSnapshot), true);
+      assert.ok((await fs.stat(lockedTemp)).isFile());
+    } finally {
+      fs.unlink = unlink;
+      if (lockedTemp) await unlink(lockedTemp);
+    }
+    // Simulate failure of the durable publication callback. Verified media must
+    // remain available, and no sidecar processing may start after that failure.
+    let published;
+    const external = path.join(directory, 'external.srt');
+    await fs.writeFile(external, 'external captions');
+    await assert.rejects(engine.convert({ ...item, sidecars: [{ file: external, suffix: '.eng.srt' }] }, directory, {
+      onPublished: async record => {
+        published = record;
+        assert.ok((await fs.stat(record.output)).size > 0);
+        throw new Error('Publication save failed');
+      }
+    }), /Publication save failed/);
+    assert.ok(published.outputSnapshot.size > 0);
+    await assert.rejects(fs.access(path.join(directory, `${path.parse(published.output).name}.eng.srt`)), { code: 'ENOENT' });
     const converted = await engine.inspect(result.output); assert.equal(converted.plan.needsConversion, false);
     assert.equal((await engine.convert(converted, directory)).skipped, true);
     const controller = new AbortController(); controller.abort();

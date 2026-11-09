@@ -83,6 +83,9 @@ function planProfileTrack(stream, capabilities, profile) {
   if (format === 'dtshd' && profile.extractDtsCore && profile.allowed.includes('dts') && (!forced || forced === 'dts') && core && core.channels > 0 && core.channels <= 6 && core.sampleRate > 0 && core.sampleRate <= 48000 && core.layout && (!downmix || downmix.target === core.layout)) {
     return { ...base, action: 'extract', codec: 'dts', channels: core.channels, layout: core.layout, sourceChannels: channels, sourceLayout: layout, sampleRate: core.sampleRate, compatibility: 'target-supported', reason: `Extract existing DTS core (${core.layout}); no additional lossy encoding. HD/immersive extensions are removed.` };
   }
+  if (format === 'dtshd' && profile.extractDtsCore && profile.allowed.includes('dts') && (!forced || forced === 'dts') && !downmix) {
+    return unresolved('DTS core extraction was requested, but no suitable core was verified; refusing to substitute a new lossy encode.');
+  }
   if (downmix) {
     layout = downmix.target; channels = { '5.1(side)': 6, '3.1': 4, stereo: 2 }[layout]; isStereo = layout === 'stereo';
   }

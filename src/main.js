@@ -19,6 +19,7 @@ const { pathToFileURL } = require('node:url');
 const { Engine } = require('./engine');
 const { nextQueueItem } = require('./queue-priority');
 const { trashOriginal } = require('./trash-original');
+const { validOutput, outputState } = require('./source-safety');
 const { toolPaths } = require('./tools');
 const { receivers, devices } = require('./catalog');
 const { defaultSettings, validateSettings, resolveProfile } = require('./profiles');
@@ -70,7 +71,7 @@ const page = path.join(__dirname, 'ui', 'index.html');
 let queueWrites = Promise.resolve();
 // Snapshots recovery fields and returns a serialized write Promise so older saves cannot overtake newer state.
 function persistQueue(required = false) {
-  const snapshot = new Map([...items].map(([id, item]) => [id, structuredClone(Object.fromEntries(['id', 'file', 'status', 'output', 'temporaryOutput', 'relativeDirectory', 'sidecars', 'importWarnings', 'error', 'priority'].map(key => [key, item[key]])))]));
+  const snapshot = new Map([...items].map(([id, item]) => [id, structuredClone(Object.fromEntries(['id', 'file', 'status', 'output', 'outputSnapshot', 'publicationPending', 'outputUnavailable', 'persistenceWarning', 'temporaryOutput', 'relativeDirectory', 'sidecars', 'importWarnings', 'warnings', 'persistencePending', 'error', 'priority'].map(key => [key, item[key]])))]));
   const write = queueWrites.then(() => saveQueue(app.getPath('userData'), snapshot));
   queueWrites = write.catch(error => send('queue-warning', { message: `Queue could not be saved: ${error.message}` }));
   return required ? write : queueWrites;
@@ -88,11 +89,13 @@ function send(type, data) {
 function handle(channel, handler) {
   ipcMain.handle(channel, async (event, ...args) => {
     if (event.sender !== window.webContents || event.senderFrame?.url !== pathToFileURL(page).href) throw new Error('Untrusted request');
+    if (queueQuitPending) throw new Error('Application shutdown is in progress.');
     return handler(...args);
   });
 }
 // Add files: receives paths. See the return statements below for the result; async results are Promises.
 async function addFiles(paths) {
+  if (queueQuitPending) throw new Error('Application shutdown is in progress.');
   if (running || importing || profileBusy || appStateBusy) throw new Error('Wait for the current operation to finish before importing.');
   if (!settings) throw new Error('Complete playback setup before importing files.');
   if (!Array.isArray(paths) || paths.some(p => typeof p !== 'string' || !path.isAbsolute(p))) throw new Error('Invalid file/folder selection.');
@@ -128,8 +131,8 @@ async function addFiles(paths) {
 }
 // Publish item: receives item, id = item.id. See the return statements below for the result; async results are Promises.
 function publishItem(item, id = item.id) {
-    item.status = item.output ? 'Complete' : ['Error', 'Cancelled'].includes(item.status) ? item.status : item.plan.needsConversion ? 'Ready' : item.plan.unresolved ? 'Needs attention' : 'Unchanged';
-    send('item', { item: { id, needsConversion: item.plan.needsConversion, droppedStreams: item.plan.droppedStreams, priority: item.priority, name: item.name, relativeDirectory: item.relativeDirectory, subtitleInfo: item.subtitleInfo, sidecarCount: item.sidecars?.length || 0, size: item.size, duration: item.duration, tracks: item.plan.tracks, warnings: [...item.plan.warnings, ...(item.importWarnings || [])], status: item.status, error: item.error || '', output: item.output || '' } });
+    item.status = item.outputUnavailable ? 'Needs attention' : item.output ? 'Complete' : ['Error', 'Cancelled'].includes(item.status) ? item.status : item.plan.needsConversion ? 'Ready' : item.plan.unresolved ? 'Needs attention' : 'Unchanged';
+    send('item', { item: { id, outputUnavailable: !!item.outputUnavailable, persistenceWarning: item.persistenceWarning || '', persistencePending: !!item.persistencePending, needsConversion: item.plan.needsConversion, droppedStreams: item.plan.droppedStreams, priority: item.priority, name: item.name, relativeDirectory: item.relativeDirectory, subtitleInfo: item.subtitleInfo, sidecarCount: item.sidecars?.length || 0, size: item.size, duration: item.duration, tracks: item.plan.tracks, warnings: [...new Set([...item.plan.warnings, ...(item.importWarnings || []), ...(item.warnings || [])])], status: item.status, error: item.error || '', output: item.output || '' } });
 }
 
 app.whenReady().then(async () => {
@@ -153,23 +156,42 @@ app.whenReady().then(async () => {
   // Queue paths also cover previous destinations when the global destination changed.
   const cleanupDirectories = [outputDirectory, ...recovered.state.items.flatMap(item =>
     [item.temporaryOutput, item.output].filter(Boolean).map(file => path.dirname(file)))];
-  await cleanupOrphanedTempFiles(cleanupDirectories);
+  await cleanupOrphanedTempFiles(cleanupDirectories, { items: recovered.state.items });
   const recoveryWarnings = recovered.warning ? [recovered.warning] : [];
   const unfinished = recovered.state.items.some(item => !['Complete', 'Unchanged'].includes(item.status));
   const restore = !unfinished || dialog.showMessageBoxSync({ type: 'question', buttons: ['Restore Queue', 'Discard'], defaultId: 0, cancelId: 1, message: 'You have an unfinished queue from your last session. Would you like to restore it?', detail: 'Interrupted jobs restart from the beginning. Recorded temporary outputs will be cleaned up.' }) === 0;
   recoveryWarnings.push(...await cleanupInterrupted(recovered.state.items));
   if (restore) for (const saved of recovered.state.items) {
+    // Published outputs are useful independently of the original source or its probe.
+    const state = saved.output ? await outputState(saved.output, saved.outputSnapshot) : 'invalid';
+    if (saved.output && state !== 'invalid') {
+      const item = { ...saved, name: path.basename(saved.file), size: 0, duration: 0,
+        temporaryOutput: '', status: 'Complete', outputUnavailable: state === 'unavailable',
+        error: state === 'unavailable' ? 'Published output is inaccessible. Reconnect storage and use Recheck outputs; the saved reference has been retained.' : '',
+        warnings: [...(saved.warnings || []), ...(saved.publicationPending ? ['Media was published, but subtitle processing or finalization was interrupted. Original retained; external subtitles may be incomplete.'] : [])],
+        publicationPending: false,
+        plan: { tracks: [], warnings: [], needsConversion: false } };
+      items.set(item.id, item);
+      publishItem(item);
+      continue;
+    }
     try {
       const item = await engine.inspect(saved.file);
       Object.assign(item, saved, { temporaryOutput: '' });
-      if (item.output) { try { await fs.access(item.output); } catch { item.output = ''; } }
+      if (item.output || item.outputUnavailable || item.publicationPending || item.persistencePending) {
+        item.output = ''; delete item.outputSnapshot;
+        item.outputUnavailable = false; item.publicationPending = false;
+        item.persistencePending = false; item.persistenceWarning = '';
+        item.status = item.plan.needsConversion ? 'Ready' : item.plan.unresolved ? 'Needs attention' : 'Unchanged';
+        item.error = '';
+      }
       if (['Converting', 'Verifying', 'Complete'].includes(item.status) && !item.output) { item.status = 'Ready'; item.error = ''; }
       items.set(item.id, item);
       publishItem(item);
     } catch (error) {
       let completed = false;
-      if (saved.output) { try { const output = await fs.lstat(saved.output); completed = output.isFile() && !output.isSymbolicLink() && output.size > 0; } catch {} }
-      items.set(saved.id, { ...saved, name: path.basename(saved.file), size: 0, duration: 0, output: completed ? saved.output : '', temporaryOutput: '', status: completed ? 'Complete' : 'Error', error: completed ? '' : `Recovery: ${error.message}`, plan: { tracks: [], warnings: [completed ? 'Original source unavailable (it may have been moved to Trash); completed output is retained.' : 'Source unavailable; re-import before converting again.'], needsConversion: false } });
+      if (saved.output) completed = await validOutput(saved.output, saved.outputSnapshot);
+      items.set(saved.id, { ...saved, outputUnavailable: false, publicationPending: false, persistencePending: false, persistenceWarning: '', name: path.basename(saved.file), size: 0, duration: 0, output: completed ? saved.output : '', temporaryOutput: '', status: completed ? 'Complete' : 'Error', error: completed ? '' : `Recovery: ${error.message}`, plan: { tracks: [], warnings: [completed ? 'Original source unavailable (it may have been moved to Trash); completed output is retained.' : 'Source unavailable; re-import before converting again.'], needsConversion: false } });
     }
   }
   if (!recovered.warning) await persistQueue();
@@ -179,6 +201,7 @@ app.whenReady().then(async () => {
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   window.webContents.on('did-finish-load', () => {
+    send('recovery-busy', { value: appStateBusy });
     for (const item of items.values()) publishItem(item);
     for (const message of recoveryWarnings) send('queue-warning', { message });
   });
@@ -288,8 +311,11 @@ app.whenReady().then(async () => {
       engine.setProfile(settings ? resolveProfile(settings) : null);
       if (previousId !== library.activeId || previousSettings !== JSON.stringify(settings)) {
         for (const item of items.values()) {
+          if (item.output) continue;
           if (settings && item.probe) engine.replan(item);
           delete item.output;
+          delete item.outputSnapshot;
+          delete item.persistencePending;
           publishItem(item);
         }
       }
@@ -301,6 +327,7 @@ app.whenReady().then(async () => {
   handle('pick-output', async () => {
     if (running || importing || appStateBusy) throw new Error('Wait until the current operation finishes before changing output folder.');
     const selection = await dialog.showOpenDialog(window, { properties: ['openDirectory', 'createDirectory'], title: 'Choose output folder' });
+    if (queueQuitPending) throw new Error('Application shutdown is in progress.');
     if (running || importing || appStateBusy) throw new Error('Wait until the current operation finishes before changing output folder.');
     if (!selection.canceled) {
       appStateBusy = true;
@@ -311,7 +338,7 @@ app.whenReady().then(async () => {
     }
     return outputDirectory;
   });
-  handle('clear', () => { if (running || importing) throw new Error('Queue is busy.'); items.clear(); return persistQueue(true); });
+  handle('clear', () => { if (running || importing || appStateBusy || profileBusy) throw new Error('Queue is busy.'); items.clear(); return persistQueue(true); });
   handle('cancel', cancelQueue);
   handle('pause', () => {
     if (!running || controller?.signal.aborted) return false;
@@ -340,13 +367,60 @@ app.whenReady().then(async () => {
   handle('reveal', id => { const item = items.get(id); if (item?.output) shell.showItemInFolder(item.output); });
   handle('start', async () => {
     if (running || profileBusy || appStateBusy) throw new Error('Queue or settings operation is already running.');
-    if (importing || !settings) throw new Error('Finish import and playback setup first.');
+    if (importing) throw new Error('Finish import first.');
+    if ([...items.values()].some(item => item.outputUnavailable) && !nextQueueItem(items, new Set())) {
+      appStateBusy = true;
+      send('recovery-busy', { value: true });
+      try {
+        for (const item of items.values()) if (item.outputUnavailable) {
+          const state = await outputState(item.output, item.outputSnapshot);
+          if (state === 'valid') {
+            item.outputUnavailable = false; item.error = ''; publishItem(item);
+          } else {
+            item.error = state === 'unavailable' ? 'Output remains inaccessible. Saved reference retained; reconnect storage and recheck.' : 'Output is missing or changed. Saved reference retained; restore the verified output or clear and re-import the source.';
+            publishItem(item);
+          }
+        }
+        await persistQueue(true);
+      } finally { appStateBusy = false; send('recovery-busy', { value: false }); }
+      return;
+    }
+    // A previous conversion may be complete even though its recovery save failed.
+    if ([...items.values()].some(item => item.persistencePending)) {
+      appStateBusy = true;
+      send('recovery-busy', { value: true });
+      try {
+        const pending = [];
+        for (const item of items.values()) if (item.persistencePending) {
+          pending.push({ item, before: { status: item.status, persistencePending: item.persistencePending,
+            persistenceWarning: item.persistenceWarning, publicationPending: item.publicationPending, warnings: item.warnings } });
+          item.status = 'Complete';
+          item.persistencePending = false;
+          item.persistenceWarning = '';
+          if (item.publicationPending) {
+            item.warnings = [...(item.warnings || []), 'Media publication was saved, but finalization was interrupted. Original retained; external subtitles may be incomplete.'];
+            item.publicationPending = false;
+          }
+          item.warnings = [...(item.warnings || []), 'Queue recovery save retried successfully. Original retained; Auto-Trash was not retried.'];
+        }
+        try { await persistQueue(true); }
+        catch (error) {
+          for (const { item, before } of pending) Object.assign(item, before);
+          throw error;
+        }
+        for (const { item } of pending) {
+          send('status', { id: item.id, status: 'Complete', persistencePending: false, persistenceWarning: '', publicationPending: false, warnings: item.warnings });
+        }
+      } finally { appStateBusy = false; send('recovery-busy', { value: false }); }
+      return;
+    }
+    if (!settings) throw new Error('Finish playback setup first.');
     if (!outputDirectory) throw new Error('Choose an output folder first.');
     running = true;
     resumeQueue();
     controller = new AbortController();
     send('running', { value: true });
-    const sleepBlocker = preferences.preventSleep ? powerSaveBlocker.start('prevent-app-suspension') : null;
+    let sleepBlocker = null;
     const record = async (status, item, started, outputBytes = 0) => {
       if (!preferences.statsEnabled) return;
       try {
@@ -356,6 +430,7 @@ app.whenReady().then(async () => {
       } catch (error) { statsWarning = `Statistics could not be saved: ${error.message}. Conversion results are unaffected.`; send('statistics-changed', {}); }
     };
     try {
+      if (preferences.preventSleep) sleepBlocker = powerSaveBlocker.start('prevent-app-suspension');
       const attempted = new Set();
       while (true) {
         if (controller.signal.aborted) break;
@@ -368,26 +443,55 @@ app.whenReady().then(async () => {
         send('status', { id: item.id, status: 'Converting', progress: 0, error: '' });
         const started = performance.now(); let lastProgressAt = 0;
         try {
-          const result = await engine.convert(item, outputDirectory, { signal: controller.signal, preferences, onTemporaryOutput: async temp => { item.temporaryOutput = temp; await persistQueue(true); }, onProgress: progress => { if (progress < 0.99 && Date.now() - lastProgressAt < 150) return; lastProgressAt = Date.now(); send('status', { id: item.id, status: progress >= 0.99 && progress < 1 ? 'Verifying' : 'Converting', progress }); } });
+          const result = await engine.convert(item, outputDirectory, { signal: controller.signal, preferences,
+            onPublished: async publication => {
+              Object.assign(item, publication, { publicationPending: true });
+              // Record media publication before any external subtitle work begins.
+              await persistQueue(true);
+            },
+            onTemporaryOutput: async temp => { item.temporaryOutput = temp; await persistQueue(true); }, onProgress: progress => { if (progress < 0.99 && Date.now() - lastProgressAt < 150) return; lastProgressAt = Date.now(); send('status', { id: item.id, status: progress >= 0.99 && progress < 1 ? 'Verifying' : 'Converting', progress }); } });
           item.output = result.output;
+          item.outputSnapshot = result.outputSnapshot;
+          item.publicationPending = false;
           // Persist the verified output before an optional source move, so a crash during
           // Trash cannot make recovery lose the successfully published destination.
-          await persistQueue(true);
-          result.warnings.push(...await trashOriginal(item, result, {
+          let saved = false;
+          try { await persistQueue(true); saved = true; }
+          catch (error) {
+            item.persistencePending = true;
+            item.persistenceWarning = `Conversion complete, but queue recovery could not be saved: ${error.message}. Original retained. Use Retry queue save after fixing storage.`;
+          }
+          if (saved) result.warnings.push(...await trashOriginal(item, result, {
             enabled: preferences.trashOriginals, signal: controller.signal,
             trashItem: file => shell.trashItem(file)
           }));
-          send('status', { id: item.id, status: 'Complete', progress: 1, output: result.output, warnings: result.warnings });
+          send('status', { id: item.id, status: 'Complete', progress: 1, output: result.output, persistenceWarning: item.persistenceWarning || '', persistencePending: !!item.persistencePending, warnings: result.warnings });
           await record('completed', item, started, result.outputBytes);
-        } catch (error) { send('status', { id: item.id, status: controller.signal.aborted ? 'Cancelled' : 'Error', error: error.message }); await record(controller.signal.aborted ? 'cancelled' : 'failed', item, started); }
+        } catch (error) {
+          if (item.output) {
+            item.persistencePending = true;
+            item.persistenceWarning = `Media published, but finalization stopped: ${error.message}. Original retained. Retry queue save; external subtitles may be incomplete.`;
+            send('status', { id: item.id, status: 'Complete', output: item.output, persistencePending: true, persistenceWarning: item.persistenceWarning, warnings: item.warnings || [] });
+            await record('completed', item, started, item.outputSnapshot?.size || 0);
+          } else { send('status', { id: item.id, status: controller.signal.aborted ? 'Cancelled' : 'Error', error: error.message }); await record(controller.signal.aborted ? 'cancelled' : 'failed', item, started); }
+        }
       }
-    } finally { resumeQueue(); if (sleepBlocker !== null) powerSaveBlocker.stop(sleepBlocker); await persistQueue(); running = false; controller = null; send('running', { value: false }); }
+    } finally {
+      try {
+        resumeQueue();
+        try {
+          if (sleepBlocker !== null) powerSaveBlocker.stop(sleepBlocker);
+        } finally { await persistQueue(); }
+      } finally {
+        running = false; controller = null; send('running', { value: false });
+      }
+    }
   });
   window.loadFile(page);
   stopUpdates = startUpdates({ app, updater: autoUpdater, dialog, shell,
-    isBusy: () => running || importing || watchBusy || profileBusy || appStateBusy || queueQuitPending,
+    isBusy: () => running || importing || watchBusy || profileBusy || appStateBusy || appearanceBusy || queueQuitPending,
     prepareInstall: async () => {
-      if (running || importing || watchBusy || profileBusy || appStateBusy || queueQuitPending) return false;
+      if (running || importing || watchBusy || profileBusy || appStateBusy || appearanceBusy || queueQuitPending) return false;
       queueQuitPending = true;
       watchStopping = true; clearInterval(watchTimer);
       try { await persistQueue(true); await queueWrites; }
@@ -416,7 +520,7 @@ app.on('before-quit', event => {
   watchStopping = true; clearInterval(watchTimer);
   cancelQueue(); importController?.abort();
   (async () => {
-    while (running || importing || watchBusy) await new Promise(resolve => setTimeout(resolve, 50));
+    while (running || importing || watchBusy || profileBusy || appStateBusy || appearanceBusy) await new Promise(resolve => setTimeout(resolve, 50));
     try {
       // queueWrites handles errors for autosaves; force a new save that rejects.
       await persistQueue(true);

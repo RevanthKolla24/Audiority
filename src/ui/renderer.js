@@ -10,6 +10,7 @@ const items = new Map();
 const expandedTracks = new Set();
 let running = false, importing = false, output = '', queuePage = 0, renderScheduled = false;
 let queuePaused = false, pauseRequestPending = false;
+let recoveryBusy = false;
 const queuePageSize = 50;
 // Schedule render: receives no explicit arguments (uses current state). See the return statements below for the result; async results are Promises.
 function scheduleRender() { if (renderScheduled) return; renderScheduled = true; requestAnimationFrame(() => { renderScheduled = false; render(); }); }
@@ -134,12 +135,13 @@ function patchCardState(card, item) {
     if (!progress) { progress = createProgress(item); card.append(progress); }
     updateProgressNode(progress, item);
   } else if (progress) progress.remove();
-  const messages = JSON.stringify([item.error, item.warnings, item.tracks?.some(t => t.compatibility === 'unresolved')]);
+  const messages = JSON.stringify([item.error, item.warnings, item.persistenceWarning, item.tracks?.some(t => t.compatibility === 'unresolved')]);
   if (messages !== previous.messages) {
     let region = card.querySelector('.item-messages');
     if (!region) { region = element('div', 'item-messages'); card.append(region); }
     region.replaceChildren();
     if (item.error) region.append(element('p', 'error', item.error));
+    if (item.persistenceWarning) region.append(element('p', 'warning-text', item.persistenceWarning));
     for (const warning of item.warnings || []) region.append(element('p', 'warning-text', warning));
     if (item.tracks?.some(t => t.compatibility === 'unresolved')) region.append(element('p', 'warning-text', 'Some tracks remain incompatible or unconfirmed. Converting this file does not resolve those tracks.'));
   }
@@ -192,21 +194,25 @@ function render() {
   } else nav?.remove();
   $('count').textContent = items.size;
   const profileOperationPending = typeof managingProfiles !== 'undefined' && managingProfiles;
-  $('start').disabled = running || importing || profileOperationPending || !output || ![...items.values()].some(i => ['Ready', 'Error', 'Cancelled'].includes(i.status) && (i.needsConversion || i.tracks?.some(t => t.action !== 'copy')));
+  const persistencePending = [...items.values()].some(i => i.persistencePending);
+  const outputUnavailable = [...items.values()].some(i => i.outputUnavailable);
+  const ready = [...items.values()].some(i => !i.output && ['Ready', 'Error', 'Cancelled'].includes(i.status) && (i.needsConversion || i.tracks?.some(t => t.action !== 'copy')));
+  $('start').textContent = persistencePending ? 'Retry queue save' : outputUnavailable && !ready ? 'Recheck outputs' : 'Convert queue →';
+  $('start').disabled = recoveryBusy || running || importing || profileOperationPending || (!outputUnavailable && !persistencePending && (!output || !ready));
   $('cancel').disabled = !running;
   $('pause').hidden = !running;
   $('pause').disabled = !running || pauseRequestPending;
   $('pause').textContent = queuePaused ? 'Resume' : 'Pause';
   $('pause').setAttribute('aria-pressed', String(queuePaused));
-  $('clear').disabled = running || importing;
-  $('folder').disabled = running || importing;
-  $('settings-pick-output').disabled = running || importing;
-  $('import-folder').disabled = running || importing || profileOperationPending;
+  $('clear').disabled = recoveryBusy || profileOperationPending || running || importing;
+  $('folder').disabled = recoveryBusy || running || importing;
+  $('settings-pick-output').disabled = recoveryBusy || running || importing;
+  $('import-folder').disabled = recoveryBusy || running || importing || profileOperationPending;
   $('cancel-import').hidden = !importing;
-  $('change-setup').disabled = running || importing || profileOperationPending;
-  for (const id of ['rename-profile', 'duplicate-profile', 'delete-profile']) $(id).disabled = running || importing || profileOperationPending;
+  $('change-setup').disabled = recoveryBusy || running || importing || profileOperationPending;
+  for (const id of ['rename-profile', 'duplicate-profile', 'delete-profile']) $(id).disabled = recoveryBusy || running || importing || profileOperationPending;
   if (typeof renderProfiles === 'function') renderProfiles();
-  $('summary').textContent = running && queuePaused ? 'Queue Paused. The active conversion will finish safely.' : running ? 'Converting locally. You can cancel safely.' : importing ? 'Inspecting audio tracks…' : `${[...items.values()].filter(i => i.status === 'Complete').length} completed · Originals untouched`;
+  $('summary').textContent = running && queuePaused ? 'Queue Paused. The active conversion will finish safely.' : running ? 'Converting locally. You can cancel safely.' : importing ? 'Inspecting audio tracks…' : `${[...items.values()].filter(i => i.status === 'Complete').length} completed · See job details for warnings`;
 }
 // Safe: receives action. See the return statements below for the result; async results are Promises.
 async function safe(action) { $('message').textContent = ''; try { await action(); } catch (error) { $('message').textContent = error.message; } }
@@ -232,6 +238,7 @@ $('pause').addEventListener('click', () => safe(async () => {
   finally { pauseRequestPending = false; render(); }
 }));
 api.onUpdate(update => {
+  if (update.type === 'recovery-busy') { recoveryBusy = update.value; render(); return; }
   if (update.type === 'queue-warning') $('message').textContent = update.message;
   if (update.type === 'item') items.set(update.item.id, update.item);
   if (update.type === 'status' && items.has(update.id)) Object.assign(items.get(update.id), update);
@@ -248,6 +255,8 @@ api.onUpdate(update => {
     $('import-report').hidden = false;
     $('import-result').textContent = `${update.cancelled ? 'Import cancelled. ' : ''}${update.inspected} inspected · ${update.duplicates} already queued · ${update.failures} failed · ${update.skipped} skipped.\n${update.warnings.join('\n')}`;
   }
-  if (!['import-progress', 'statistics-changed'].includes(update.type)) scheduleRender();
+  // Queue controls must not wait for a frame: background windows can throttle rAF.
+  if (['running', 'paused', 'importing'].includes(update.type)) render();
+  else if (!['import-progress', 'statistics-changed'].includes(update.type)) scheduleRender();
 });
 render();

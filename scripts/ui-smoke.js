@@ -19,7 +19,8 @@ app.on('browser-window-created', (_event, window) => {
       const execute = code => window.webContents.executeJavaScript(code);
       const waitFor = async code => {
         for (let i = 0; i < 100; i++) { if (await execute(code)) return; await new Promise(resolve => setTimeout(resolve, 50)); }
-        throw new Error(`Timed out waiting for ${code}`);
+        const diagnostic = await execute(`({ running, importing, message: $('message').textContent, summary: $('summary').textContent, items: [...items.values()].map(i => ({ id: i.id, status: i.status, output: i.output, needsConversion: i.needsConversion })) })`);
+        throw new Error(`Timed out waiting for ${code}: ${JSON.stringify(diagnostic)}`);
       };
       await waitFor(`document.getElementById('catalog-count').textContent.includes('126')`);
       await waitFor(`document.querySelector('.queue-empty-logo')?.complete && document.querySelector('.queue-empty-logo').naturalWidth > 0`);
@@ -290,7 +291,7 @@ app.on('browser-window-created', (_event, window) => {
       await waitFor(`[...items.values()].some(item => item.status === 'Complete')`);
       // A paused final job must finish the run without requiring Resume or Cancel.
       await waitFor(`!running && !queuePaused && $('pause').hidden`);
-      assert.equal(trashedSources.length, 1);
+      assert.deepEqual(trashedSources.map(file => fs.realpathSync(file)), [path.join(show, 'Episode 01.mkv'), path.join(show, 'Episode 01.eng.srt')].map(file => fs.realpathSync(file)));
       assert.ok(fs.existsSync(trashedSources[0]));
       shell.trashItem = originalTrashItem;
       await execute(`window.audiority.pause()`);

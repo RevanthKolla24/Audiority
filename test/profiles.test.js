@@ -11,6 +11,20 @@ const caps = { dca: { layouts: ['mono', 'stereo', '5.1(side)'], rates: [44100, 4
 const audio = (codec, extra = {}) => ({ index: 0, codec_type: 'audio', codec_name: codec, channels: 6, channel_layout: '5.1(side)', sample_rate: '48000', ...extra });
 const settings = overrides => ({ ...defaultSettings(), receiverId: 'bose-lifestyle-v20', deviceId: 'shield-tv-pro', passthrough: 'enabled', pathConfirmed: true, pathCodecs: ['dts', 'ac3', 'pcm', 'eac3', 'dtshd', 'truehd'], ...overrides });
 
+test('DTS-HD core extraction does not silently fall back to lossy encoding', () => {
+  const profile = resolveProfile(settings());
+  const source = audio('dts', { profile: 'DTS-HD MA' });
+  const missing = planTrack(source, caps, profile);
+  assert.equal(missing.action, 'copy');
+  assert.equal(missing.compatibility, 'unresolved');
+  assert.match(missing.reason, /refusing to substitute/);
+  const extracted = planTrack({ ...source, audiorityCore: { channels: 6, layout: '5.1(side)', sampleRate: 48000 } }, caps, profile);
+  assert.equal(extracted.action, 'extract');
+  assert.equal(extracted.codec, 'dts');
+  const invalid = planTrack({ ...source, audiorityCore: { channels: 6, layout: '5.1(side)', sampleRate: 96000 } }, caps, profile);
+  assert.equal(invalid.compatibility, 'unresolved');
+});
+
 test('QA: bandwidth restrictions, mono bitrate and missing optional metadata stay safe', () => {
   for (const connection of ['arc', 'optical']) {
     const profile = resolveProfile(settings({ connection, advanced: true, allowed: ['pcm', 'ac3'], pathCodecs: ['pcm', 'ac3'] }));
@@ -39,7 +53,7 @@ test('Bose V20 only enables reported DTS/AC-3/PCM stereo; E-AC-3 converts', () =
   assert.ok(profile.warnings.some(w => /reported/.test(w)));
   assert.equal(planTrack(audio('eac3'), caps, profile).codec, 'ac3');
   assert.equal(planTrack(audio('dts', { profile: 'DTS' }), caps, profile).action, 'copy');
-  assert.equal(planTrack(audio('dts', { profile: 'DTS-HD MA' }), caps, profile).action, 'encode');
+  assert.equal(planTrack(audio('dts', { profile: 'DTS-HD MA' }), caps, profile).compatibility, 'unresolved');
 });
 test('documented modern HDMI profile can preserve TrueHD and DTS-HD', () => {
   const profile = resolveProfile(settings({ receiverId: 'denon-avr-x3800h' }));

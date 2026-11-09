@@ -24,6 +24,17 @@ test('dynamic priority selects newest first, preserves retries and never repeats
   assert.equal(nextQueueItem(items, new Set()), c);
 });
 
+test('automatic completed cleanup retains unresolved recovery work', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'audiority-pending-'));
+  try {
+    const items = ['normal', 'save', 'publication', 'unavailable'].map(id => ({ id, file: path.join(directory, `${id}.mkv`),
+      output: path.join(directory, `${id}.converted.mkv`), status: 'Complete',
+      persistencePending: id === 'save', publicationPending: id === 'publication', outputUnavailable: id === 'unavailable' }));
+    await saveQueue(directory, new Map(items.map(item => [item.id, item])));
+    assert.deepEqual((await loadQueue(directory, { clearCompletedOnRestart: true })).state.items.map(item => item.id), ['save', 'publication', 'unavailable']);
+  } finally { await fs.rm(directory, { recursive: true, force: true }); }
+});
+
 test('queue round trips, filters completed only when requested, and replaces corrupt storage', async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'audiority-queue-'));
   try {

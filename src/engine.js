@@ -15,6 +15,7 @@ const { sourceFormat } = require('./profiles');
 const os = require('node:os');
 const { resolveOutputDirectory } = require('./imports');
 const { validatePreferences, preferencesDefaults } = require('./app-state');
+const { sourceIdentity, sameSource } = require('./source-safety');
 // A title is a hint only for retained embedded subtitles, never audio or fonts.
 function needsForcedSubtitleFlag(stream) {
   return stream.codec_type === 'subtitle' && /\bforced\b/i.test(stream.tags?.title || '') && stream.disposition?.forced !== 1;
@@ -22,11 +23,11 @@ function needsForcedSubtitleFlag(stream) {
 // Exclusive streaming refuses existing destinations, but exposes the final name
 // while copying. Only clean up a destination that we successfully created.
 // Accepts a verified temp file and output folder/name; returns destination and whether copying was needed.
-async function publishOutput(temp, directory, basename, { io = fs, signal } = {}) {
+async function publishOutput(temp, directory, basename, { io = fs, signal, suffix = '.mkv', maxNames = 10000 } = {}) {
   let copyOnly = false;
-  for (let i = 0; i < 10000; i++) {
+  for (let i = 0; i < maxNames; i++) {
     if (signal?.aborted) throw new Error('Cancelled');
-    const destination = path.join(directory, `${basename}${i ? ` (${i})` : ''}.mkv`);
+    const destination = path.join(directory, `${basename}${i ? ` (${i})` : ''}${suffix}`);
     if (!copyOnly) {
       // A hard link gives the same bytes a second name atomically, refusing an existing name.
       try { await io.link(temp, destination); return { destination, copied: false }; }
@@ -64,6 +65,35 @@ async function publishOutput(temp, directory, basename, { io = fs, signal } = {}
     }
   }
   throw new Error('Could not find an unused output filename.');
+}
+// Verify a private copy before exposing its playback name. A collision is never overwritten.
+async function publishSidecar(sidecar, target, { signal, io = fs, hash = hashFile } = {}) {
+  const before = await sourceIdentity(sidecar.file);
+  const temp = path.join(path.dirname(target), `.subtitle-${crypto.randomUUID()}.tmp`);
+  let owned = false, record;
+  try {
+    // Reserve our private name before writing so cleanup cannot remove a collision.
+    const handle = await io.open(temp, 'wx');
+    owned = true;
+    try { await pipeline(createReadStream(sidecar.file), handle.createWriteStream(), { signal }); }
+    finally { await handle.close().catch(() => {}); }
+    const digest = await hash(sidecar.file, signal);
+    if (digest !== await hash(temp, signal)) throw new Error(`Subtitle copy verification failed: ${target}`);
+    if (!sameSource(before, await sourceIdentity(sidecar.file))) throw new Error('Subtitle source changed during copying.');
+    await publishOutput(temp, path.dirname(target), path.basename(target), { io, signal, suffix: '', maxNames: 1 });
+    record = { file: sidecar.file, output: target, identity: before, hash: digest };
+    return record;
+  } finally {
+    if (owned) {
+      try { await io.unlink(temp); }
+      catch (error) {
+        if (error.code !== 'ENOENT') {
+          if (!record) throw new Error(`Subtitle publication failed; could not remove temporary file ${temp}: ${error.message}`, { cause: error });
+          record.warning = `Subtitle published and verified, but temporary file cleanup failed: ${temp} — ${error.message}`;
+        }
+      }
+    }
+  }
 }
 // Accepts a path and cancellation signal; returns a SHA-256 fingerprint using bounded read chunks.
 async function hashFile(file, signal) {
@@ -193,6 +223,20 @@ class Engine {
       subtitleInfo: { count: subtitles.length, ass: subtitles.filter(s => ['ass', 'ssa'].includes(s.codec_name)).length, fonts: fonts.length, attachments: attachments.length } };
   }
   // Accepts job/output/signal; compares content and metadata with bounded parallel probes, throwing on mismatch.
+  async verifyVideo(item, outputFile, signal) {
+    for (const [ordinal, source] of item.probe.streams.filter(stream => stream.codec_type === 'video').entries()) {
+      const args = ['-v', 'error', '-select_streams', String(source.index), '-show_streams', '-show_packets', '-show_data_hash', 'sha256',
+        '-show_entries', 'stream=codec_name,width,height,pix_fmt,extradata_hash,color_range,color_space,color_transfer,color_primaries:packet=data_hash', '-of', 'json'];
+      const outputArgs = [...args]; outputArgs[outputArgs.indexOf('-select_streams') + 1] = `v:${ordinal}`;
+      const hashes = await Promise.allSettled([
+        hashProbe(this.tools.ffprobe, [...args, item.file], signal),
+        hashProbe(this.tools.ffprobe, [...outputArgs, outputFile], signal)
+      ]);
+      const failure = hashes.find(result => result.status === 'rejected');
+      if (failure) throw failure.reason;
+      if (hashes[0].value !== hashes[1].value) throw new Error(`Verification failed: copied video content or format changed (stream ${source.index}).`);
+    }
+  }
   async verifySubtitles(item, outputFile, signal) {
     // Stream copy must preserve ASS style headers, subtitle packets and all
     // attachment payloads. No decode/render step is used or implied here.
@@ -249,11 +293,12 @@ class Engine {
     }
   }
   // Accepts a planned job, folder and callbacks; returns verified output paths, warnings and size after publication.
-  async convert(item, directory, { signal, onProgress = () => {}, onTemporaryOutput = async () => {}, preferences = preferencesDefaults() } = {}) {
+  async convert(item, directory, { signal, onProgress = () => {}, onTemporaryOutput = async () => {}, onPublished = async () => {}, preferences = preferencesDefaults() } = {}) {
     preferences = validatePreferences(preferences);
     // Use a local plan snapshot; never mutate the displayed queue during execution.
     item = { ...item, plan: { ...item.plan, tracks: item.plan.tracks.map(track => ({ ...track, keepOriginal: track.action !== 'copy' && !!(track.keepOriginal || preferences.keepOriginal) })) } };
     if (!item.plan.needsConversion) return { skipped: true, reason: 'No convertible tracks; original unchanged.' };
+    const sourceSnapshot = await sourceIdentity(item.file);
     directory = await resolveOutputDirectory(directory, preferences.preserveFolders ? item.relativeDirectory || '' : '');
     const directoryStat = await fs.stat(directory);
     if (!directoryStat.isDirectory()) throw new Error('Output destination is not a folder.');
@@ -268,6 +313,7 @@ class Engine {
     if (space.bavail * space.bsize < item.size + audioBytes + 64 * 1024 * 1024) throw new Error('Insufficient free space for a safe conversion.');
     const basename = `${path.parse(item.name).name}${preferences.outputSuffix}`;
     const temp = path.join(directory, `.${basename}.${crypto.randomUUID()}.partial.mkv`);
+    let publicationCleanupAttempted = false;
     // -i opens the source; -n refuses overwrite; -nostdin forbids interactive prompts.
     // -map 0 selects ALL streams from input zero, not just FFmpeg's automatic favorites.
     // Metadata/chapters come from input zero; -c copy avoids decoding/encoding by default.
@@ -351,6 +397,7 @@ class Engine {
       onProgress(0.99);
       const output = await this.probe(temp, signal);
       verifyOutput(item, output);
+      await this.verifyVideo(item, temp, signal);
       for (const [i, track] of item.plan.tracks.entries()) if (track.keepOriginal) {
         // a:i means the i-th audio stream (not absolute stream index). Compare compressed
         // packet payload hashes to prove copied/retained audio bytes were not re-encoded.
@@ -363,25 +410,40 @@ class Engine {
       }
       await this.verifySubtitles(item, temp, signal);
       const { destination, copied } = await publishOutput(temp, directory, basename, { signal });
+      // Removing the private hard link changes ctime; snapshot the final file afterward.
+      publicationCleanupAttempted = true;
+      let cleanupWarning;
+      try { await fs.unlink(temp); }
+      catch (error) {
+        if (error.code !== 'ENOENT') cleanupWarning = `Media published and verified, but temporary file cleanup failed: ${temp} — ${error.message}`;
+      }
+      const outputSnapshot = await sourceIdentity(destination);
+      await onPublished({ output: destination, outputSnapshot });
       const warnings = [...item.plan.warnings, ...(item.importWarnings || [])];
+      if (cleanupWarning) warnings.push(cleanupWarning);
       if (copied) warnings.push('Hard links unavailable: output published using an exclusive copy. The destination was visible during copying.');
       // Publish each matching external subtitle without overwriting anything.
       // Sidecar failures do not invalidate a verified media output; report them.
       const sidecars = [];
+      const verifiedSidecars = [];
       for (const sidecar of item.sidecars || []) {
         if (signal?.aborted) { warnings.push('Cancelled during external subtitle copy; media output is complete.'); break; }
         try {
           if (typeof sidecar.suffix !== 'string' || !/^\.[^/\\]+\.(ass|ssa|srt)$/i.test(sidecar.suffix) && !/^\.(ass|ssa|srt)$/i.test(sidecar.suffix)) throw new Error('Unsafe subtitle suffix.');
-          if (!(await fs.lstat(sidecar.file)).isFile()) throw new Error('Subtitle is no longer a regular file.');
           const target = path.join(directory, `${path.parse(destination).name}${sidecar.suffix}`);
-          await fs.copyFile(sidecar.file, target, require('node:fs').constants.COPYFILE_EXCL);
-          if (await hashFile(sidecar.file, signal) !== await hashFile(target, signal)) throw new Error(`Subtitle copy verification failed: ${target}`);
+          const record = await publishSidecar(sidecar, target, { signal });
+          verifiedSidecars.push(record);
+          if (record.warning) warnings.push(record.warning);
           sidecars.push(target);
         } catch (error) { warnings.push(`External subtitle not copied/verified: ${path.basename(sidecar.file)} — ${error.message}`); }
       }
       onProgress(1);
-      return { output: destination, warnings, sidecars, outputBytes: (await fs.stat(destination)).size };
-    } finally { await fs.unlink(temp).catch(() => {}); }
+      return { output: destination, warnings, sidecars, verifiedSidecars, sourceSnapshot, outputSnapshot, outputBytes: outputSnapshot.size };
+    } finally {
+      // A second unlink after snapshotting would change the hard-linked output's
+      // ctime. Leave a failed cleanup for startup rather than invalidating identity.
+      if (!publicationCleanupAttempted) await fs.unlink(temp).catch(() => {});
+    }
   }
 }
 
@@ -419,4 +481,4 @@ function verifyOutput(item, output) {
   if (item.duration && (!Number.isFinite(outputDuration) || Math.abs(outputDuration - item.duration) > Math.max(1, item.duration * 0.001))) throw new Error('Verification failed: output duration differs from input.');
 }
 
-module.exports = { Engine, run, parseCapabilities, verifyOutput, hashFile, hashProbe, publishOutput };
+module.exports = { Engine, run, parseCapabilities, verifyOutput, hashFile, hashProbe, publishOutput, publishSidecar };

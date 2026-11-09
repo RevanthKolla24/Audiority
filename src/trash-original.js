@@ -5,6 +5,8 @@
  */
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const { sourceIdentity, sameSource, validOutput } = require('./source-safety');
+const { hashFile } = require('./engine');
 
 // Called only after engine.convert succeeds. Returns warnings, never deletes permanently.
 async function trashOriginal(item, result, { enabled, signal, trashItem }) {
@@ -16,6 +18,20 @@ async function trashOriginal(item, result, { enabled, signal, trashItem }) {
     const output = await fs.lstat(result.output);
     if (!source.isFile() || source.isSymbolicLink() || !output.isFile() || output.isSymbolicLink() || output.size === 0) throw new Error('Source/output is not a safe regular file.');
     if (await fs.realpath(item.file) === await fs.realpath(result.output) || (source.dev === output.dev && source.ino === output.ino)) throw new Error('Source and output refer to the same file.');
+    if (!sameSource(result.sourceSnapshot, await sourceIdentity(item.file))) throw new Error('Source changed since conversion or its identity was not recorded.');
+    if (!result.outputSnapshot || !await validOutput(result.output, result.outputSnapshot)) throw new Error('Verified media output changed or its identity was not recorded.');
+    // Validate all subtitle copies before removing the media source. Do not trust counts alone.
+    const verified = new Map((result.verifiedSidecars || []).map(record => [record.file, record]));
+    const checkSubtitle = async sidecar => {
+      const record = verified.get(sidecar.file);
+      if (!record || !(result.sidecars || []).includes(record.output)) throw new Error('Verified subtitle identity is missing.');
+      const before = await sourceIdentity(sidecar.file);
+      await sourceIdentity(record.output);
+      if (!sameSource(record.identity, before) || await hashFile(sidecar.file, signal) !== record.hash || await hashFile(record.output, signal) !== record.hash || !sameSource(before, await sourceIdentity(sidecar.file))) throw new Error('Subtitle source or verified copy changed.');
+    };
+    for (const sidecar of item.sidecars || []) await checkSubtitle(sidecar);
+    if (!sameSource(result.sourceSnapshot, await sourceIdentity(item.file))) throw new Error('Source changed before Trash cleanup.');
+    if (!await validOutput(result.output, result.outputSnapshot)) throw new Error('Verified media output changed before Trash cleanup.');
     if (signal?.aborted) return ['Original retained: queue was canceled before moving it to Trash.'];
     await trashItem(path.resolve(item.file));
     const warnings = [];
@@ -24,7 +40,12 @@ async function trashOriginal(item, result, { enabled, signal, trashItem }) {
         warnings.push('Remaining subtitle sources retained: queue was canceled during Trash cleanup.');
         break;
       }
-      try { await trashItem(path.resolve(sidecar.file)); }
+      try {
+        // The main Trash operation may have taken time: check each source again.
+        await checkSubtitle(sidecar);
+        if (signal?.aborted) { warnings.push('Remaining subtitle sources retained: queue was canceled during Trash cleanup.'); break; }
+        await trashItem(path.resolve(sidecar.file));
+      }
       catch (error) { warnings.push(`Could not move subtitle source to Trash: ${path.basename(sidecar.file)} — ${error.message}`); }
     }
     return warnings;
