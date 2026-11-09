@@ -1,0 +1,10 @@
+/* Explicit caret/selection contrast for themed Windows form controls.
+ * The OS mouse I-beam is separate from the blinking insertion caret. */
+input:not([type=checkbox]):not([type=radio]):not([type=color]), textarea {
+  caret-color: var(--theme-text);
+  cursor: url("../assets/text-cursor.svg") 12 12, text;
+}
+input::selection, textarea::selection {
+  background: var(--theme-accent);
+  color: var(--theme-accentText);
+}

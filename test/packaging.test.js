@@ -18,6 +18,14 @@ test('installer targets use explicit agreements and bundle prepared tools', asyn
   assert.equal(build.dmg.license, build.nsis.license);
   assert.equal(build.icon, 'build/icon.png');
   assert.ok(fs.existsSync(path.join(root, build.icon)));
+  assert.equal(build.win.icon, 'build/icon.ico');
+  assert.equal(build.nsis.installerIcon, build.win.icon);
+  assert.equal(build.nsis.uninstallerIcon, build.win.icon);
+  const ico = fs.readFileSync(path.join(root, build.win.icon));
+  assert.equal(ico.readUInt16LE(2), 1);
+  assert.equal(ico.readUInt16LE(4), 1);
+  assert.equal(ico.readUInt32LE(14), ico.length - 22);
+  assert.equal(ico.subarray(22, 30).toString('hex'), '89504e470d0a1a0a');
   assert.ok(fs.readFileSync(path.join(root, build.dmg.license), 'utf8').includes('MIT License'));
   assert.ok(build.mac.extraResources.some(r => r.from === 'legal-tools' && r.to === 'tools'));
   assert.ok(build.win.extraResources.some(r => r.from === 'legal-tools-win' && r.to === 'tools'));

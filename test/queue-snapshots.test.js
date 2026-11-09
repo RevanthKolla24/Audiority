@@ -46,6 +46,6 @@ test('idle footer makes no unsupported claim that originals were retained', () =
   const renderer = fs.readFileSync(path.join(__dirname, '../src/ui/renderer.js'), 'utf8');
   const statement = renderer.split('\n').find(line => line.includes("$('summary').textContent ="));
   const node = {};
-  vm.runInNewContext(statement, { $: () => node, running: false, importing: false, items: new Map([['done', { status: 'Complete' }]]) });
+  vm.runInNewContext(statement, { $: () => node, running: false, importing: false, output: '/chosen-output', items: new Map([['done', { status: 'Complete' }]]) });
   assert.equal(node.textContent, '1 completed · See job details for warnings');
 });

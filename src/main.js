@@ -233,7 +233,9 @@ app.whenReady().then(async () => {
     const icon = nativeImage.createFromDataURL(dataURL);
     if (icon.isEmpty() || icon.getSize().width !== 256 || icon.getSize().height !== 256) throw new Error('Invalid theme icon image.');
     if (process.platform === 'darwin') { if (app.dock) app.dock.setIcon(icon); }
-    else for (const activeWindow of BrowserWindow.getAllWindows()) if (!activeWindow.isDestroyed()) activeWindow.setIcon(icon);
+    // Installed Windows shortcuts use the packaged ICO. Keep the window/taskbar
+    // artwork consistent rather than recoloring only one of the two icons.
+    else if (process.platform !== 'win32') for (const activeWindow of BrowserWindow.getAllWindows()) if (!activeWindow.isDestroyed()) activeWindow.setIcon(icon);
     return true;
   });
   handle('get-app-settings', () => ({ preferences, warning: preferencesWarning, outputDirectory, version: app.getVersion() }));
@@ -444,6 +446,7 @@ app.whenReady().then(async () => {
         const started = performance.now(); let lastProgressAt = 0;
         try {
           const result = await engine.convert(item, outputDirectory, { signal: controller.signal, preferences,
+            onVerification: verificationStage => send('status', { id: item.id, status: 'Verifying', progress: 0.99, verificationStage }),
             onPublished: async publication => {
               Object.assign(item, publication, { publicationPending: true });
               // Record media publication before any external subtitle work begins.

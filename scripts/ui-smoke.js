@@ -25,6 +25,22 @@ app.on('browser-window-created', (_event, window) => {
       await waitFor(`document.getElementById('catalog-count').textContent.includes('126')`);
       await waitFor(`document.querySelector('.queue-empty-logo')?.complete && document.querySelector('.queue-empty-logo').naturalWidth > 0`);
       assert.equal(await execute(`document.querySelector('.queue-empty-logo').alt`), 'Audiority logo');
+      const usability = await execute(`(() => {
+        const previousOutput = output;
+        output = ''; syncOutputFolder(); render();
+        const folderPrompt = $('start').textContent === 'Choose output folder first' && $('summary').textContent.includes('Choose an output folder');
+        output = previousOutput; syncOutputFolder(); render();
+        const durations = remainingText(125) === '2m 5s' && remainingText(3661) === '1h 1m 1s' && remainingText(9) === '9s';
+        const selected = $('playback-device').value;
+        $('device-search').value = 'firestick'; $('device-search').dispatchEvent(new Event('input', { bubbles: true }));
+        const matching = [...$('playback-device').options].filter(option => option.textContent.includes('Fire TV Stick'));
+        const search = matching.length >= 10 && $('playback-device').value === selected;
+        $('device-search').value = ''; $('device-search').dispatchEvent(new Event('input', { bubbles: true }));
+        const caret = getComputedStyle($('profile-name')).caretColor === getComputedStyle($('profile-name')).color;
+        const cursor = getComputedStyle($('profile-name')).cursor.includes('text-cursor.svg');
+        return { folderPrompt, durations, search, caret, cursor };
+      })()`);
+      assert.ok(Object.values(usability).every(Boolean), JSON.stringify(usability));
       const progressChecks = await execute(`(() => {
         const item = { id: 'progress-test', name: 'ETA test', status: 'Converting', progress: 0.5, progressStart: Date.now() - 10000 };
         items.set(item.id, item);
@@ -34,6 +50,9 @@ app.on('browser-window-created', (_event, window) => {
         const thickness = getComputedStyle(card.querySelector('progress')).height === '6px';
         item.status = 'Verifying'; patchProgress({ id: item.id, status: 'Verifying', progress: 0.99 });
         const verifying = card.querySelector('.progress-text').textContent === 'Verifying output...';
+        item.verificationStage = 'Checking video 1: output · 200 packets checked';
+        patchProgress({ id: item.id, status: 'Verifying', progress: 0.99 });
+        const stage = card.querySelector('.progress-text').textContent.includes('200 packets checked');
         item.status = 'Complete'; item.progress = 1;
         const complete = createProgress(item).querySelector('.progress-text').textContent === 'Complete';
         item.status = 'Converting'; item.progress = 0; patchProgress({ id: item.id, status: 'Converting', progress: 0 });
@@ -41,7 +60,7 @@ app.on('browser-window-created', (_event, window) => {
         const originalPage = currentPage; currentPage = 'settings'; item.progress = 0.1; patchProgress({ id: item.id, status: 'Converting', progress: 0.1 });
         const offscreen = !!item.progressStart; currentPage = originalPage;
         items.delete(item.id); card.remove();
-        return { eta, thickness, verifying, complete, reset, offscreen };
+        return { eta, thickness, verifying, stage, complete, reset, offscreen };
       })()`);
       assert.ok(Object.values(progressChecks).every(Boolean), JSON.stringify(progressChecks));
       const languageRoundTrip = await execute(`(() => {
@@ -69,7 +88,12 @@ app.on('browser-window-created', (_event, window) => {
         delete items.get('reconcile-54').priority; delete items.get('reconcile-53').priority; render();
         const item = items.get('reconcile-0'); item.status = 'Ready';
         item.tracks = [{ sourceCodec: 'flac', codec: 'dca', action: 'encode', channels: 6, language: 'eng', reason: 'First plan' }]; render();
-        const readyButton = !!first.querySelector('.prioritize-item');
+        const readyButton = !first.querySelector('.prioritize-item');
+        const second = items.get('reconcile-1'); second.status = 'Ready'; second.tracks = item.tracks;
+        render();
+        const reorderButtons = !first.querySelector('.prioritize-item') && !!$('queue').querySelector('[data-id="reconcile-1"] .prioritize-item');
+        second.status = 'Inspecting'; second.tracks = []; render();
+        if (!reorderButtons) throw new Error('Queue reorder controls should appear only for a runnable job behind another');
         const details = first.querySelector('details'); details.open = true; expandedTracks.add(item.id);
         render(); const retainedDetails = details === first.querySelector('details') && details.open;
         item.tracks[0].reason = 'Changed profile'; render();
@@ -209,8 +233,10 @@ app.on('browser-window-created', (_event, window) => {
       await execute(`document.getElementById('import-folder').click()`);
       await waitFor(`document.getElementById('count').textContent === '1' && document.getElementById('cancel-import').hidden`);
       assert.ok(await execute(`document.getElementById('queue').textContent.includes('Anime') && document.getElementById('queue').textContent.includes('1 external subtitle')`));
-      await execute(`document.querySelector('#queue .prioritize-item').click()`);
-      await waitFor(`items.values().next().value.priority > 0 && !document.querySelector('#queue .prioritize-item').disabled`);
+      assert.equal(await execute(`document.querySelector('#queue .prioritize-item') === null`), true);
+      // A one-job queue needs no reorder control; priority IPC still persists safely.
+      await execute(`api.prioritizeItem(items.values().next().value.id)`);
+      await waitFor(`items.values().next().value.priority > 0`);
       const priorityState = JSON.parse(fs.readFileSync(path.join(userData, 'queue.json'), 'utf8'));
       assert.ok(priorityState.items[0].priority > 0);
       assert.equal(await execute(`window.audiority.prioritizeItem('missing-id').then(() => false, () => true)`), true);

@@ -6,6 +6,21 @@ const path = require('node:path');
 const { Engine, run } = require('../src/engine');
 const { toolPaths } = require('../src/tools');
 
+test('copied H.264 ignores incidental title metadata but still verifies video payload and format', { timeout: 60000 }, async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'audiority-video-tags-'));
+  try {
+    const tools = toolPaths(), engine = new Engine(tools);
+    const input = path.join(dir, 'source.mkv'), output = path.join(dir, 'copy.mkv');
+    await run(tools.ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=64x64:r=5', '-t', '1', '-c:v', 'libx264', '-metadata:s:v:0', 'title=Original title', input]);
+    await run(tools.ffmpeg, ['-v', 'error', '-i', input, '-map', '0', '-c', 'copy', '-metadata:s:v:0', 'title=Rewritten title', output]);
+    const item = { file: input, probe: await engine.probe(input) };
+    const stages = [];
+    await engine.verifyVideo(item, output, undefined, stage => stages.push(stage));
+    assert.ok(stages.some(stage => stage.includes('Checking video')));
+    assert.ok(stages.some(stage => stage.includes('packets checked')));
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
 test('real remux preserves video packets, styled ASS and font attachments, and rejects changed video', { timeout: 60000 }, async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'audiority-remux-preservation-'));
   try {

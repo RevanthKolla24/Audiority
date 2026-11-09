@@ -11,12 +11,13 @@ const expandedTracks = new Set();
 let running = false, importing = false, output = '', queuePage = 0, renderScheduled = false;
 let queuePaused = false, pauseRequestPending = false;
 let recoveryBusy = false;
+let firstRunnableId = '', runnableCount = 0;
 const queuePageSize = 50;
 // Schedule render: receives no explicit arguments (uses current state). See the return statements below for the result; async results are Promises.
 function scheduleRender() { if (renderScheduled) return; renderScheduled = true; requestAnimationFrame(() => { renderScheduled = false; render(); }); }
 // Sync output folder: receives no explicit arguments (uses current state). See the return statements below for the result; async results are Promises.
 function syncOutputFolder() {
-  $('destination').textContent = output || 'No folder selected';
+  $('destination').textContent = output || 'Choose output folder (required)';
   $('folder').title = output || 'Choose output folder';
   $('settings-output').textContent = output || 'No output folder selected';
 }
@@ -33,13 +34,14 @@ function element(tag, className, text) { const node = document.createElement(tag
 function progressValue(item) { return Number.isFinite(item.progress) ? Math.min(1, Math.max(0, item.progress)) : 0; }
 // Remaining text: receives seconds. Returns the calculated value for the caller.
 function remainingText(seconds) {
-  const rounded = Math.max(1, Math.ceil(seconds));
-  return `${rounded}s`;
+  const rounded = Math.max(0, Math.ceil(seconds));
+  const hours = Math.floor(rounded / 3600), minutes = Math.floor(rounded % 3600 / 60);
+  return `${hours ? `${hours}h ` : ''}${hours || minutes ? `${minutes}m ` : ''}${rounded % 60}s`;
 }
 // Progress text: receives item. Returns the calculated value for the caller.
 function progressText(item) {
   if (item.status === 'Complete') return 'Complete';
-  if (item.status === 'Verifying') return 'Verifying output...';
+  if (item.status === 'Verifying') return item.verificationStage || 'Verifying output...';
   if (item.status !== 'Converting') return item.status;
   const value = progressValue(item);
   const elapsed = item.progressStart ? (Date.now() - item.progressStart) / 1000 : 0;
@@ -98,7 +100,7 @@ function patchCardState(card, item) {
     body.replaceChildren();
     const head = element('div', 'item-head');
     const info = element('div'); const name = element('div', 'name', item.name); name.title = item.name; info.append(name);
-    if (item.size) info.append(element('div', 'meta', `${(item.size / 1024 ** 3).toFixed(2)} GB · ${Math.round(item.duration)} seconds · ${item.tracks?.length || 0} audio track(s)`));
+    if (item.size) info.append(element('div', 'meta', `${(item.size / 1024 ** 3).toFixed(2)} GB · ${remainingText(item.duration)} · ${item.tracks?.length || 0} audio track(s)`));
     head.append(info, element('span', 'status')); body.append(head);
     if (item.relativeDirectory) body.append(element('p', 'meta', `Output: ${item.relativeDirectory}`));
     if (item.subtitleInfo?.ass) body.append(element('p', 'warning-text', `${item.subtitleInfo.ass} ASS/SSA track(s) · ${item.subtitleInfo.fonts} embedded font(s). Subtitle content and attachments are preserved and verified; player rendering is not confirmed.`));
@@ -118,7 +120,7 @@ function patchCardState(card, item) {
   const statusClass = `status ${item.status.toLowerCase().replaceAll(' ', '-')}`;
   if (status.className !== statusClass) status.className = statusClass;
   let prioritize = card.querySelector('.prioritize-item');
-  if (item.status === 'Ready' && !item.output) {
+  if (item.status === 'Ready' && !item.output && runnableCount > 1 && firstRunnableId !== item.id) {
     if (!prioritize) {
       prioritize = element('button', 'quiet prioritize-item', '↑ Move to Top');
       prioritize.setAttribute('aria-label', `Move ${item.name} to top of queue`);
@@ -154,6 +156,8 @@ function patchCardState(card, item) {
 }
 // Reads queue state; patches the visible priority-sorted page and controls without wiping all cards.
 function render() {
+  const candidates = [...items.values()].filter(i => !i.output && ['Ready', 'Error', 'Cancelled'].includes(i.status) && (i.needsConversion || i.tracks?.some(t => t.action !== 'copy'))).sort((a, b) => (b.priority || 0) - (a.priority || 0));
+  runnableCount = candidates.length; firstRunnableId = candidates[0]?.id || '';
   if (typeof currentPage !== 'undefined' && currentPage !== 'queue') return;
   const queue = $('queue');
   const all = [...items.values()].sort((a, b) => (b.priority || 0) - (a.priority || 0));
@@ -197,7 +201,7 @@ function render() {
   const persistencePending = [...items.values()].some(i => i.persistencePending);
   const outputUnavailable = [...items.values()].some(i => i.outputUnavailable);
   const ready = [...items.values()].some(i => !i.output && ['Ready', 'Error', 'Cancelled'].includes(i.status) && (i.needsConversion || i.tracks?.some(t => t.action !== 'copy')));
-  $('start').textContent = persistencePending ? 'Retry queue save' : outputUnavailable && !ready ? 'Recheck outputs' : 'Convert queue →';
+  $('start').textContent = persistencePending ? 'Retry queue save' : outputUnavailable && !ready ? 'Recheck outputs' : !output ? 'Choose output folder first' : 'Convert queue →';
   $('start').disabled = recoveryBusy || running || importing || profileOperationPending || (!outputUnavailable && !persistencePending && (!output || !ready));
   $('cancel').disabled = !running;
   $('pause').hidden = !running;
@@ -212,7 +216,7 @@ function render() {
   $('change-setup').disabled = recoveryBusy || running || importing || profileOperationPending;
   for (const id of ['rename-profile', 'duplicate-profile', 'delete-profile']) $(id).disabled = recoveryBusy || running || importing || profileOperationPending;
   if (typeof renderProfiles === 'function') renderProfiles();
-  $('summary').textContent = running && queuePaused ? 'Queue Paused. The active conversion will finish safely.' : running ? 'Converting locally. You can cancel safely.' : importing ? 'Inspecting audio tracks…' : `${[...items.values()].filter(i => i.status === 'Complete').length} completed · See job details for warnings`;
+  $('summary').textContent = running && queuePaused ? 'Queue Paused. The active conversion will finish safely.' : running ? 'Processing locally. You can cancel safely.' : importing ? 'Inspecting audio tracks…' : !output ? 'Choose an output folder using “Exporting to” below before converting.' : `${[...items.values()].filter(i => i.status === 'Complete').length} completed · See job details for warnings`;
 }
 // Safe: receives action. See the return statements below for the result; async results are Promises.
 async function safe(action) { $('message').textContent = ''; try { await action(); } catch (error) { $('message').textContent = error.message; } }

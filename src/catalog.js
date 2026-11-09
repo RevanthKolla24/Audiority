@@ -38,6 +38,26 @@ Object.assign(receivers.find(r => r.name === 'Bose Lifestyle V20'), { status: 'u
 receivers.sort((a, b) => a.name.localeCompare(b.name, 'en', { numeric: true }));
 
 const devices = [
+  ...[
+    ['fire-tv-stick-2014', 'Fire TV Stick (1st Gen, 2014)'],
+    ['fire-tv-stick-2016', 'Fire TV Stick (2nd Gen, 2016)'],
+    ['fire-tv-stick-basic-2017', 'Fire TV Stick Basic Edition (2017)'],
+    ['fire-tv-stick-2020', 'Fire TV Stick (3rd Gen, 2020)'],
+    ['fire-tv-stick-lite-2020', 'Fire TV Stick Lite (2020)'],
+    ['fire-tv-stick-hd-2024', 'Fire TV Stick HD (2024)'],
+    ['fire-tv-stick-hd-2026', 'Fire TV Stick HD (2026)'],
+    ['fire-tv-stick-4k-2018', 'Fire TV Stick 4K (1st Gen, 2018)'],
+    ['fire-tv-stick-4k-2023', 'Fire TV Stick 4K (2nd Gen, 2023)'],
+    ['fire-tv-stick-4k-2026', 'Fire TV Stick 4K (3rd Gen, 2026)'],
+    ['fire-tv-stick-4k-max-2021', 'Fire TV Stick 4K Max (1st Gen, 2021)'],
+    ['fire-tv-stick-4k-plus-2025', 'Fire TV Stick 4K Plus (2025)'],
+    ['fire-tv-stick-4k-select-2025', 'Fire TV Stick 4K Select (2025)'],
+    ['fire-tv-cube-2018', 'Fire TV Cube (1st Gen, 2018)'],
+    ['fire-tv-cube-2019', 'Fire TV Cube (2nd Gen, 2019)'],
+    ['fire-tv-cube-2022', 'Fire TV Cube (3rd Gen, 2022)']
+  ].map(([id, name]) => ({ id, name: `Amazon ${name}`, codecs: null, status: 'unknown',
+    sources: ['https://developer.amazon.com/docs/device-specs/device-specifications-comparison-table.html'],
+    note: 'Model listed for identification only. Confirm the actual player, firmware and HDMI path; decoding does not establish passthrough support.' })),
   { id: 'fire-tv-stick-4k-max-2023', name: 'Amazon Fire TV Stick 4K Max (2nd Gen, 2023)', codecs: null, status: 'unknown', sources: ['https://developer.amazon.com/docs/fire-tv/device-specifications-fire-tv-streaming-media-player.html'], note: 'Model identified; confirm formats for the actual app, firmware and HDMI path. Decoder support is not proof of passthrough. No surround support assumed until confirmed.' },
   { id: 'apple-tv-4k', name: 'Apple TV 4K', codecs: ['ac3', 'eac3', 'pcm'], status: 'documented-output', sources: ['https://support.apple.com/en-us/102218'], note: 'Select Dolby Digital 5.1 under Audio Format for older receivers. This profile avoids DTS bitstream assumptions; app file decoding varies.' },
   ...['Amazon Fire TV (specify model)', 'Chromecast / Google TV (specify model)', 'Google TV Streamer', 'LG webOS TV (specify model)', 'macOS computer', 'Roku (specify model)', 'Samsung Tizen TV (specify model)', 'Windows computer', 'Xbox (specify model)'].map(name => ({ id: idFor(name), name, codecs: null, status: 'unknown', sources: [], note: 'Model, OS, application and audio-output capabilities need confirmation. No surround support assumed.' })),

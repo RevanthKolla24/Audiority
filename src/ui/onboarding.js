@@ -150,6 +150,7 @@ function fillDraft(value) {
   for (const [id, key] of [['ac3-bitrate', 'ac3Bitrate'], ['dts-bitrate', 'dtsBitrate'], ['pcm-bits', 'pcmBits'], ['pcm-rate', 'pcmRate'], ['media-platform', 'platform'], ['audio-connection', 'connection'], ['passthrough', 'passthrough']]) $(id).value = draft[key];
   $('rule-list').replaceChildren(); draft.rules.forEach(ruleRow);
   refreshMatrix(draft);
+  $('device-search').value = '';
   selectOptions($('playback-device'), setupData.devices.map(d => [d.id, d.name]), draft.deviceId);
   $('player-app').value = draft.player; $('tv-model').value = draft.tv; $('path-confirmed').checked = draft.pathConfirmed;
   checkboxes('path-formats', ['ac3', 'dts', 'pcm', 'eac3', 'dtshd', 'truehd'], draft.pathCodecs);
@@ -245,7 +246,14 @@ $('reset-advanced').addEventListener('click', () => { const current = readDraft(
 $('receiver-next').addEventListener('click', () => showStep(2));
 $('playback-back').addEventListener('click', () => showStep(1));
 $('playback-page').addEventListener('change', () => { deviceDetail(); previewProfile(); });
-$('playback-page').addEventListener('input', () => previewProfile());
+$('playback-page').addEventListener('input', event => { if (event.target.id !== 'device-search') previewProfile(); });
+// Keep the selected device visible so filtering never silently changes a profile.
+$('device-search').addEventListener('input', () => {
+  const normalize = text => text.toLowerCase().replace(/fire\s*(?:tv\s*)?stick/g, 'firetvstick').replace(/[^a-z0-9]/g, '');
+  const query = normalize($('device-search').value), selected = $('playback-device').value;
+  const matches = setupData.devices.filter(device => device.id === selected || device.id === 'custom' || normalize(device.name).includes(query));
+  selectOptions($('playback-device'), matches.map(device => [device.id, device.name]), selected);
+});
 $('setup-save').addEventListener('click', () => safe(async () => {
   $('setup-save').disabled = true;
   try { await performProfile({ type: 'save', id: editingId, name: $('profile-name').value, settings: readDraft() }); }

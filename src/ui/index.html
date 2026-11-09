@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="desktop.css">
   <link rel="stylesheet" href="themes.css">
   <link rel="stylesheet" href="pages.css">
+  <link rel="stylesheet" href="windows-input.css">
 </head>
 <body>
   <aside class="sidebar"><div class="brand"><span class="brand-mark">a</span><strong>Audiority</strong></div><div class="sidebar-heading">Playback profiles <span id="profile-count">0</span></div><input id="profile-search" type="search" placeholder="Find a profile…" aria-label="Search profiles"><div id="profile-list" class="profile-list"></div><button id="new-profile">+ New profile</button><p class="sidebar-bottom">Local processing<br>Original files stay untouched.</p></aside>
@@ -28,9 +29,10 @@
         <div class="setup-actions"><span id="receiver-help" class="meta"></span><button id="receiver-next" class="primary" disabled>Next: playback setup →</button></div>
       </section>
       <section id="playback-page" class="setup-card" hidden>
-        <span class="eyebrow">CHECK THE COMPLETE SIGNAL PATH</span><h2>Where will you play your media?</h2><p>A receiver’s codec support is only one part of the chain. Include your player, connection and TV.</p>
+        <span class="eyebrow">CHECK THE COMPLETE SIGNAL PATH</span><h2>Where will you play your media?</h2><p>A receiver’s codec support is only one part of the chain. Include your player, connection and TV.</p><p>After saving this profile, choose an output folder using <strong>Exporting to</strong> in the queue footer. An output folder is required before conversion can start.</p>
         <div class="form-grid">
           <label>Media platform<select id="media-platform"><option value="local">Local player / files</option><option value="plex">Plex</option><option value="jellyfin">Jellyfin</option><option value="other">Other</option></select></label>
+          <label>Find a playback device<input id="device-search" type="search" placeholder="e.g. Firestick, 4K Max, Windows" aria-label="Search playback devices"></label>
           <label>Playback device<select id="playback-device"></select></label>
           <label>Player app / version (optional)<input id="player-app" maxlength="160" placeholder="e.g. Jellyfin Android TV"></label>
           <label>Connection to receiver<select id="audio-connection"><option value="hdmi">Direct HDMI to receiver</option><option value="arc">Through TV → HDMI ARC</option><option value="earc">Through TV → HDMI eARC</option><option value="optical">Optical / S/PDIF</option><option value="coaxial">Coaxial / S/PDIF</option><option value="unknown">Other / I’m not sure</option></select></label>

@@ -102,23 +102,36 @@ async function hashFile(file, signal) {
   return hash.digest('hex');
 }
 // Accepts probe executable/arguments/signal; returns a hash of its output without storing a huge JSON string.
-async function hashProbe(binary, args, signal) {
+async function hashProbe(binary, args, signal, onActivity = () => {}) {
   const hash = crypto.createHash('sha256');
-  await run(binary, args, { signal, onLine: line => hash.update(`${line}\n`) });
+  let packets = 0, lastReport = 0;
+  await run(binary, args, { signal, idleTimeoutMs: 120000, onLine: line => {
+    hash.update(`${line}\n`);
+    if (line.includes('"data_hash"')) packets++;
+    if (Date.now() - lastReport >= 1000) { lastReport = Date.now(); onActivity(packets); }
+  } });
   return hash.digest('hex');
 }
 
 // Accepts an executable and argument array; returns a Promise for output or rejects on tool failure/cancellation.
-function run(binary, args, { signal, onLine } = {}) {
+function run(binary, args, { signal, onLine, idleTimeoutMs = 0 } = {}) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(new Error('Cancelled'));
     // spawn starts a separate OS process. An argument array avoids shell parsing of filenames.
     // Pipes let us read progress/errors; ignored stdin prevents the tool waiting for keyboard input.
     const child = spawn(binary, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '', stderr = '', pending = '';
+    let idleTimer, timedOut = false;
+    const activity = () => {
+      if (!idleTimeoutMs) return;
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => { timedOut = true; child.kill(); }, idleTimeoutMs);
+    };
+    activity();
     const abort = () => { child.kill(); };
     signal?.addEventListener('abort', abort, { once: true });
     child.stdout.on('data', chunk => {
+      activity();
       if (!onLine) stdout += chunk.toString();
       else {
         pending += chunk.toString();
@@ -126,11 +139,13 @@ function run(binary, args, { signal, onLine } = {}) {
         for (const line of lines) onLine(line);
       }
     });
-    child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-24000); });
-    child.on('error', error => { signal?.removeEventListener('abort', abort); reject(error); });
+    child.stderr.on('data', chunk => { activity(); stderr = (stderr + chunk.toString()).slice(-24000); });
+    child.on('error', error => { clearTimeout(idleTimer); signal?.removeEventListener('abort', abort); reject(error); });
     child.on('close', code => {
+      clearTimeout(idleTimer);
       signal?.removeEventListener('abort', abort);
       if (signal?.aborted) reject(new Error('Cancelled'));
+      else if (timedOut) reject(new Error(`Verification stalled: no tool activity for ${idleTimeoutMs / 1000} seconds. Check that the media drive is connected and readable.${stderr.trim() ? ` ${stderr.trim()}` : ''}`));
       else if (code !== 0) reject(new Error(stderr.trim() || `Process exited with ${code}`));
        else { if (onLine && pending) onLine(pending); resolve({ stdout, stderr }); }
     });
@@ -182,9 +197,9 @@ class Engine {
     return versions;
   }
   // Probe: receives file, signal. See the return statements below for the result; async results are Promises.
-  async probe(file, signal) {
+  async probe(file, signal, idleTimeoutMs = 0) {
     // Probe container, streams and chapters as JSON; -v error hides informational chatter.
-    const result = await run(this.tools.ffprobe, ['-v', 'error', '-show_format', '-show_streams', '-show_chapters', '-of', 'json', file], { signal });
+    const result = await run(this.tools.ffprobe, ['-v', 'error', '-show_format', '-show_streams', '-show_chapters', '-of', 'json', file], { signal, idleTimeoutMs });
     return JSON.parse(result.stdout);
   }
   // Inspect dts core: receives file, index, signal. See the return statements below for the result; async results are Promises.
@@ -223,21 +238,22 @@ class Engine {
       subtitleInfo: { count: subtitles.length, ass: subtitles.filter(s => ['ass', 'ssa'].includes(s.codec_name)).length, fonts: fonts.length, attachments: attachments.length } };
   }
   // Accepts job/output/signal; compares content and metadata with bounded parallel probes, throwing on mismatch.
-  async verifyVideo(item, outputFile, signal) {
+  async verifyVideo(item, outputFile, signal, onVerification = () => {}) {
     for (const [ordinal, source] of item.probe.streams.filter(stream => stream.codec_type === 'video').entries()) {
+      onVerification(`Checking video ${ordinal + 1}…`);
       const args = ['-v', 'error', '-select_streams', String(source.index), '-show_streams', '-show_packets', '-show_data_hash', 'sha256',
-        '-show_entries', 'stream=codec_name,width,height,pix_fmt,extradata_hash,color_range,color_space,color_transfer,color_primaries:packet=data_hash', '-of', 'json'];
+        '-show_entries', 'stream=codec_name,width,height,pix_fmt,extradata_hash,color_range,color_space,color_transfer,color_primaries:stream_tags=:stream_disposition=:stream_side_data=:packet=data_hash:packet_side_data=', '-of', 'json'];
       const outputArgs = [...args]; outputArgs[outputArgs.indexOf('-select_streams') + 1] = `v:${ordinal}`;
       const hashes = await Promise.allSettled([
-        hashProbe(this.tools.ffprobe, [...args, item.file], signal),
-        hashProbe(this.tools.ffprobe, [...outputArgs, outputFile], signal)
+        hashProbe(this.tools.ffprobe, [...args, item.file], signal, count => onVerification(`Checking video ${ordinal + 1}: source · ${count.toLocaleString()} packets checked`)),
+        hashProbe(this.tools.ffprobe, [...outputArgs, outputFile], signal, count => onVerification(`Checking video ${ordinal + 1}: output · ${count.toLocaleString()} packets checked`))
       ]);
       const failure = hashes.find(result => result.status === 'rejected');
       if (failure) throw failure.reason;
       if (hashes[0].value !== hashes[1].value) throw new Error(`Verification failed: copied video content or format changed (stream ${source.index}).`);
     }
   }
-  async verifySubtitles(item, outputFile, signal) {
+  async verifySubtitles(item, outputFile, signal, onVerification = () => {}) {
     // Stream copy must preserve ASS style headers, subtitle packets and all
     // attachment payloads. No decode/render step is used or implied here.
     if (!item.plan.needsConversion) return;
@@ -249,6 +265,7 @@ class Engine {
     if (signal?.aborted) abort();
     let next = 0, failure;
     const verify = async source => {
+      onVerification(`Checking ${source.codec_type === 'subtitle' ? 'subtitle' : 'attachment'} stream ${source.index}…`);
       // Select one stream; fingerprint codec header/font data and retain only relevant
       // tags/dispositions. Subtitle packet hashes additionally check the actual text/events.
       const args = ['-v', 'error', '-select_streams', String(source.index), '-show_streams', '-show_data_hash', 'sha256', '-show_entries', 'stream=codec_name,extradata_hash:stream_tags=language,title,filename,mimetype:stream_disposition=default,forced'];
@@ -258,12 +275,14 @@ class Engine {
       if (needsForcedSubtitleFlag(source)) {
         for (let i = 0; i < args.length; i++) if (args[i] === '-show_entries') args[i + 1] = args[i + 1].replace('stream_disposition=default,forced', 'stream_disposition=default');
       }
+      // Container side data is not subtitle text/font payload and may be rewritten.
+      for (let i = 0; i < args.length; i++) if (args[i] === '-show_entries') args[i + 1] += ':stream_side_data=:packet_side_data=';
       args.push('-of', 'json');
       const ordinal = targets.filter(s => s.codec_type === source.codec_type).findIndex(s => s.index === source.index);
       const outputArgs = [...args]; outputArgs[outputArgs.indexOf('-select_streams') + 1] = `${source.codec_type === 'subtitle' ? 's' : 't'}:${ordinal}`;
       const [before, after] = await Promise.all([
-        track(hashProbe(this.tools.ffprobe, [...args, item.file], controller.signal)),
-        track(hashProbe(this.tools.ffprobe, [...outputArgs, outputFile], controller.signal))
+        track(hashProbe(this.tools.ffprobe, [...args, item.file], controller.signal, count => onVerification(`Checking ${source.codec_type} stream ${source.index}: source · ${count.toLocaleString()} packets checked`))),
+        track(hashProbe(this.tools.ffprobe, [...outputArgs, outputFile], controller.signal, count => onVerification(`Checking ${source.codec_type} stream ${source.index}: output · ${count.toLocaleString()} packets checked`)))
       ]);
       if (before !== after) throw new Error(`Verification failed: subtitle/attachment content or metadata changed (stream ${source.index}).`);
     };
@@ -293,7 +312,7 @@ class Engine {
     }
   }
   // Accepts a planned job, folder and callbacks; returns verified output paths, warnings and size after publication.
-  async convert(item, directory, { signal, onProgress = () => {}, onTemporaryOutput = async () => {}, onPublished = async () => {}, preferences = preferencesDefaults() } = {}) {
+  async convert(item, directory, { signal, onProgress = () => {}, onVerification = () => {}, onTemporaryOutput = async () => {}, onPublished = async () => {}, preferences = preferencesDefaults() } = {}) {
     preferences = validatePreferences(preferences);
     // Use a local plan snapshot; never mutate the displayed queue during execution.
     item = { ...item, plan: { ...item.plan, tracks: item.plan.tracks.map(track => ({ ...track, keepOriginal: track.action !== 'copy' && !!(track.keepOriginal || preferences.keepOriginal) })) } };
@@ -395,20 +414,25 @@ class Engine {
       if (signal?.aborted) throw new Error('Cancelled');
       // Process exit, not its final timestamp, starts verification. Complete is sent only after publication.
       onProgress(0.99);
-      const output = await this.probe(temp, signal);
+      onVerification('Checking output structure…');
+      const output = await this.probe(temp, signal, 120000);
       verifyOutput(item, output);
-      await this.verifyVideo(item, temp, signal);
+      await this.verifyVideo(item, temp, signal, onVerification);
       for (const [i, track] of item.plan.tracks.entries()) if (track.keepOriginal) {
         // a:i means the i-th audio stream (not absolute stream index). Compare compressed
         // packet payload hashes to prove copied/retained audio bytes were not re-encoded.
-        const hashArgs = ['-v', 'error', '-select_streams', `a:${i}`, '-show_packets', '-show_data_hash', 'sha256', '-show_entries', 'packet=data_hash', '-of', 'json'];
+        onVerification(`Checking retained audio ${i + 1}…`);
+        const hashArgs = ['-v', 'error', '-select_streams', `a:${i}`, '-show_packets', '-show_data_hash', 'sha256', '-show_entries', 'packet=data_hash:packet_side_data=', '-of', 'json'];
         const inputArgs = [...hashArgs]; inputArgs[inputArgs.indexOf('-select_streams') + 1] = String(track.index);
-        const hashes = await Promise.allSettled([hashProbe(this.tools.ffprobe, [...inputArgs, item.file], signal), hashProbe(this.tools.ffprobe, [...hashArgs, temp], signal)]);
+        const hashes = await Promise.allSettled([
+          hashProbe(this.tools.ffprobe, [...inputArgs, item.file], signal, count => onVerification(`Checking retained audio ${i + 1}: source · ${count.toLocaleString()} packets checked`)),
+          hashProbe(this.tools.ffprobe, [...hashArgs, temp], signal, count => onVerification(`Checking retained audio ${i + 1}: output · ${count.toLocaleString()} packets checked`))
+        ]);
         const failure = hashes.find(result => result.status === 'rejected');
         if (failure) throw failure.reason;
         if (hashes[0].value !== hashes[1].value) throw new Error(`Verification failed: retained original audio changed (track ${i + 1}).`);
       }
-      await this.verifySubtitles(item, temp, signal);
+      await this.verifySubtitles(item, temp, signal, onVerification);
       const { destination, copied } = await publishOutput(temp, directory, basename, { signal });
       // Removing the private hard link changes ctime; snapshot the final file afterward.
       publicationCleanupAttempted = true;
