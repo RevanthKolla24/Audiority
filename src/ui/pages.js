@@ -4,7 +4,19 @@
  * Learning note: async functions return Promises; await gets their result and try/catch handles failure.
  */
 let currentPage = 'queue', preferencesData;
-const preferenceBooleans = ['trashOriginals', 'keepDefaultTrack', 'keepOriginal', 'normalizeVolume', 'clearCompletedOnRestart', 'rememberOutput', 'preserveFolders', 'preventSleep', 'compact', 'reducedMotion', 'statsEnabled', 'storeFilenames'];
+function renderUpdateState(state) {
+  const labels = { disabled: 'Automatic updates are available in installed Windows/macOS builds, not development runs.', idle: 'Ready to check.', checking: 'Checking for updates…', current: 'You are up to date.', downloading: `Downloading ${state.version || 'update'} · ${Math.floor(state.percent || 0)}%`, ready: `Version ${state.version} is ready. Installation waits until work is idle.`, available: `Version ${state.version} is available for manual download on macOS.`, installing: 'Saving queue and starting installer…', error: `Update failed: ${state.error}. You can retry below.` };
+  $('update-status').textContent = labels[state.status] || 'Update status unavailable.';
+  $('update-check').disabled = ['disabled', 'checking', 'downloading', 'installing'].includes(state.status);
+  $('update-check').textContent = state.status === 'error' ? 'Retry update check' : 'Check for updates';
+  $('update-install').hidden = !['ready', 'available'].includes(state.status) && !state.canInstall;
+  $('update-install').textContent = state.status === 'available' ? 'Open release page' : 'Install and restart';
+}
+$('update-check').addEventListener('click', () => safe(async () => renderUpdateState(await api.checkUpdates())));
+$('update-install').addEventListener('click', () => safe(async () => renderUpdateState(await api.installUpdate())));
+api.onUpdate(update => { if (update.type === 'app-update') renderUpdateState(update.state); });
+safe(async () => renderUpdateState(await api.getUpdateState()));
+const preferenceBooleans = ['trashOriginals', 'keepDefaultTrack', 'keepOriginal', 'normalizeVolume', 'dialogueBoost', 'clearCompletedOnRestart', 'rememberOutput', 'preserveFolders', 'preventSleep', 'compact', 'reducedMotion', 'statsEnabled', 'storeFilenames'];
 // Apply preferences: receives value. Updates state or visible controls; callers use the side effect.
 function applyPreferences(value) {
   document.documentElement.classList.toggle('compact', value.compact);
@@ -18,10 +30,16 @@ function fillPreferences(data) {
   $('pref-allowedLanguages').value = (data.preferences.allowedLanguages || []).join(', ');
   for (const key of preferenceBooleans) $(`pref-${key}`).checked = data.preferences[key];
   for (const key of ['threads', 'inspectionConcurrency', 'outputSuffix']) $(`pref-${key}`).value = data.preferences[key];
+  $('pref-performanceMode').value = data.preferences.performanceMode || 'balanced';
   $('settings-output').textContent = data.outputDirectory || 'No output folder selected';
   $('settings-result').textContent = data.warning || '';
   applyPreferences(data.preferences);
+  $('trash-warning').hidden = !data.preferences.trashOriginals;
   output = data.outputDirectory || ''; syncOutputFolder();
+  if (typeof setupData !== 'undefined' && setupData?.profile && typeof effectivePolicyText === 'function') {
+    $('active-profile').textContent = api.platform === 'win32' ? profileText(setupData.profile) : `${profileText(setupData.profile)} · ${effectivePolicyText(setupData.profile)}`;
+    $('profile-policy-detail').textContent = effectivePolicyText(setupData.profile);
+  }
   renderPresetThemes();
 }
 // Render preset themes: receives no explicit arguments (uses current state). Updates state or visible controls; callers use the side effect.
@@ -42,6 +60,13 @@ function renderPresetThemes() {
 }
 // Show page: receives page. Updates state or visible controls; callers use the side effect.
 function showPage(page) {
+  // Direct transitions (native menu commands and profile entry/exit) also
+  // supersede pending requests, even if a profile draft subsequently closes.
+  navigationVersion++;
+  if (typeof profileEditing !== 'undefined' && profileEditing) {
+    if (page === 'queue') return;
+    throw new Error('Save or cancel your profile edits first.');
+  }
   currentPage = page;
   $('settings-page').hidden = page !== 'settings'; $('statistics-page').hidden = page !== 'statistics';
   $('setup').hidden = page !== 'queue' || !!savedSettings;
@@ -50,27 +75,57 @@ function showPage(page) {
   $('view-title').textContent = page === 'settings' ? 'Settings' : page === 'statistics' ? 'Statistics' : savedSettings ? 'Conversion queue' : 'Create a playback profile';
   if (page === 'queue') render();
 }
-for (const name of ['queue', 'settings', 'statistics']) $(`nav-${name}`).addEventListener('click', () => safe(async () => {
-  if (name !== 'queue' && !$('setup').hidden && savedSettings) throw new Error('Save or cancel your profile edits first.');
-  if (name === 'settings') fillPreferences(await api.getAppSettings());
-  if (name === 'statistics') renderStatistics(await api.getStatistics());
+// A slow page request must never override a newer navigation choice or profile draft.
+let navigationVersion = 0;
+async function navigatePage(name) {
+  const version = ++navigationVersion;
+  if (profileEditing) {
+    if (name === 'queue') return;
+    throw new Error('Save or cancel your profile edits first.');
+  }
+  let data;
+  try {
+    if (name === 'settings') data = await api.getAppSettings();
+    if (name === 'statistics') data = await api.getStatistics();
+  } catch (error) {
+    if (version !== navigationVersion || profileEditing) return;
+    throw error;
+  }
+  if (version !== navigationVersion || profileEditing) return;
+  if (name === 'settings') fillPreferences(data);
+  if (name === 'statistics') renderStatistics(data);
   showPage(name);
-}));
+}
+for (const name of ['queue', 'settings', 'statistics']) $(`nav-${name}`).addEventListener('click', () => safe(() => navigatePage(name)));
+let preferencesEditVersion = 0;
+for (const event of ['input', 'change']) $('app-settings-form').addEventListener(event, () => { preferencesEditVersion++; });
 $('app-settings-form').addEventListener('submit', event => { event.preventDefault(); safe(async () => {
+  if ($('settings-save').disabled) return;
+  const pageVersion = navigationVersion, editVersion = preferencesEditVersion, originalData = preferencesData;
   const value = { ...preferencesData.preferences };
   value.watchEnabled = $('pref-watchEnabled').checked;
   for (const key of preferenceBooleans) value[key] = $(`pref-${key}`).checked;
   for (const key of ['threads', 'inspectionConcurrency']) value[key] = Number($(`pref-${key}`).value);
   value.allowedLanguages = $('pref-allowedLanguages').value.split(',').map(s => s.trim()).filter(Boolean);
   value.outputSuffix = $('pref-outputSuffix').value;
+  value.performanceMode = $('pref-performanceMode').value;
   $('settings-save').disabled = true;
-  try { fillPreferences(await api.saveAppSettings(value)); $('settings-result').textContent = 'Settings saved.'; }
+  try {
+    const data = await api.saveAppSettings(value);
+    if (pageVersion !== navigationVersion || profileEditing || preferencesData !== originalData) return;
+    if (editVersion === preferencesEditVersion) {
+      fillPreferences(data);
+      $('settings-result').textContent = 'Settings saved.';
+    } else {
+      $('settings-result').textContent = 'Submitted settings saved. Your newer edits are not saved yet.';
+    }
+  }
   finally { $('settings-save').disabled = false; }
 }); });
 $('settings-pick-output').addEventListener('click', () => safe(chooseOutputFolder));
 $('settings-pick-watch').addEventListener('click', () => safe(async () => {
   const folder = await api.pickWatchFolder();
-  if (folder) { preferencesData.preferences.watchFolder = folder; $('settings-watch-folder').textContent = folder; }
+  if (folder) { preferencesEditVersion++; preferencesData.preferences.watchFolder = folder; $('settings-watch-folder').textContent = folder; }
 }));
 $('settings-edit-profile').addEventListener('click', () => safe(async () => { if (!savedSettings) throw new Error('Create a playback profile first.'); showPage('queue'); openSetup(); }));
 $('settings-diagnostics').addEventListener('click', () => safe(() => api.exportDiagnostics()));

@@ -13,6 +13,14 @@ let queuePaused = false, pauseRequestPending = false;
 let recoveryBusy = false;
 let firstRunnableId = '', runnableCount = 0;
 const queuePageSize = 50;
+let showAudioDetails = false;
+try { showAudioDetails = localStorage.getItem('audiority.audioDetails') === 'true'; } catch { /* Storage unavailable: use compact view. */ }
+$('show-audio-details').checked = showAudioDetails;
+$('show-audio-details').addEventListener('change', () => {
+  showAudioDetails = $('show-audio-details').checked;
+  try { localStorage.setItem('audiority.audioDetails', String(showAudioDetails)); } catch { /* View still works for this session. */ }
+  render();
+});
 // Schedule render: receives no explicit arguments (uses current state). See the return statements below for the result; async results are Promises.
 function scheduleRender() { if (renderScheduled) return; renderScheduled = true; requestAnimationFrame(() => { renderScheduled = false; render(); }); }
 // Sync output folder: receives no explicit arguments (uses current state). See the return statements below for the result; async results are Promises.
@@ -27,7 +35,7 @@ async function chooseOutputFolder() {
   if (selected) output = selected;
   syncOutputFolder(); render();
 }
-const label = codec => codec === 'dca' || codec === 'dts' ? 'DTS' : codec === 'ac3' ? 'Dolby Digital' : codec === 'eac3' ? 'Dolby Digital Plus' : codec.startsWith('pcm_') ? 'PCM' : codec.toUpperCase();
+const label = codec => codec === 'dtshd' ? 'DTS-HD' : codec === 'dca' || codec === 'dts' ? 'DTS' : codec === 'ac3' ? 'Dolby Digital' : codec === 'eac3' ? 'Dolby Digital Plus' : codec.startsWith('pcm_') ? 'PCM' : codec.toUpperCase();
 // Element: receives tag, className, text. See the return statements below for the result; async results are Promises.
 function element(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; }
 // Progress value: receives item. Returns the calculated value for the caller.
@@ -41,19 +49,29 @@ function remainingText(seconds) {
 // Progress text: receives item. Returns the calculated value for the caller.
 function progressText(item) {
   if (item.status === 'Complete') return 'Complete';
-  if (item.status === 'Verifying') return item.verificationStage || 'Verifying output...';
+  if (item.status === 'Verifying') {
+    const check = item.verification;
+    if (!check) return `${item.verificationStage || 'Checking output structure…'} · Estimating check time; publishing follows`;
+    const estimate = Number.isFinite(check.remainingLow) && Number.isFinite(check.remainingHigh) ? `~${remainingText(check.remainingLow)}–${remainingText(check.remainingHigh)} in this phase` : 'Estimating check time';
+    const stage = (item.verificationStage || 'Verifying output').split(': source')[0].split(': output')[0].split(' · ')[0];
+    return `${check.phase || stage} · ${Math.floor(check.fraction * 100)}% of checks · ${estimate} · ${check.completed}/${check.total} scans done · ${check.pending?.length ? `${check.pending.join(', ')}; ` : ''}publishing follows`;
+  }
+  if (item.status === 'Publishing') return `${item.verificationStage || 'Publishing verified output…'} · Finishing file and external subtitles; time remaining unavailable`;
   if (item.status !== 'Converting') return item.status;
   const value = progressValue(item);
   const elapsed = item.progressStart ? (Date.now() - item.progressStart) / 1000 : 0;
   const percent = `${Math.floor(value * 100)}%`;
   // The estimate is for writing/conversion only, not subsequent verification.
-  if (elapsed < 3 || value <= 0 || value >= 1) return `${percent} · Estimating…`;
+  if (elapsed < 3 || value <= 0 || value >= 1) return `${percent} · Estimating… · writing only; checks follow`;
   const remaining = elapsed / value - elapsed;
-  return Number.isFinite(remaining) ? `${percent} · ~${remainingText(remaining)} remaining` : `${percent} · Estimating…`;
+  return Number.isFinite(remaining) ? `${percent} · ~${remainingText(remaining)} writing remaining · checks follow` : `${percent} · Estimating… · writing only; checks follow`;
 }
 // Update progress node: receives wrap, item. Updates state or visible controls; callers use the side effect.
 function updateProgressNode(wrap, item) {
-  wrap.querySelector('progress').value = item.status === 'Complete' ? 1 : progressValue(item);
+  wrap.title = item.status === 'Verifying' ? item.verificationStage || '' : '';
+  const bar = wrap.querySelector('progress');
+  if (item.status === 'Publishing' || item.status === 'Verifying' && !item.verification) bar.removeAttribute('value');
+  else bar.value = item.status === 'Complete' ? 1 : item.status === 'Verifying' ? Math.min(0.99, item.verification.fraction) : progressValue(item);
   wrap.querySelector('.progress-text').textContent = progressText(item);
 }
 // Create progress: receives item. See the return statements below for the result; async results are Promises.
@@ -92,7 +110,7 @@ function createItemCard(item) {
 // Accepts existing card/job; updates changed regions while retaining the card and expanded details.
 function patchCardState(card, item) {
   const previous = cardSnapshots.get(card) || {};
-  const content = JSON.stringify([item.name, item.size, item.duration, item.relativeDirectory, item.subtitleInfo, item.sidecarCount, item.tracks]);
+  const content = JSON.stringify([item.name, item.size, item.duration, item.relativeDirectory, item.subtitleInfo, item.sidecarCount, item.droppedStreams, item.tracks, item.outputPreview, !!item.output, showAudioDetails]);
   if (content !== previous.content) {
     // Rebuild only the changed plan region, retaining the card and runtime nodes.
     let body = card.querySelector('.item-content');
@@ -103,14 +121,32 @@ function patchCardState(card, item) {
     if (item.size) info.append(element('div', 'meta', `${(item.size / 1024 ** 3).toFixed(2)} GB · ${remainingText(item.duration)} · ${item.tracks?.length || 0} audio track(s)`));
     head.append(info, element('span', 'status')); body.append(head);
     if (item.relativeDirectory) body.append(element('p', 'meta', `Output: ${item.relativeDirectory}`));
-    if (item.subtitleInfo?.ass) body.append(element('p', 'warning-text', `${item.subtitleInfo.ass} ASS/SSA track(s) · ${item.subtitleInfo.fonts} embedded font(s). Subtitle content and attachments are preserved and verified; player rendering is not confirmed.`));
+    if (item.subtitleInfo?.ass) body.append(element('p', 'warning-text', `${item.subtitleInfo.ass} source ASS/SSA track(s) · ${item.subtitleInfo.fonts} embedded font(s). Retained subtitles and attachments are checked before publication; player rendering is not confirmed.`));
+    if (item.droppedStreams?.length) body.append(element('p', 'warning-text', `Language filter removes source stream(s): ${item.droppedStreams.join(', ')}. Review language policy before starting.`));
     if (item.sidecarCount) body.append(element('p', 'meta', `${item.sidecarCount} external subtitle(s) will be copied alongside converted output.`));
+    if (item.outputPreview) {
+      const preview = element('section', 'audio-output-preview');
+      preview.setAttribute('aria-label', 'Planned audio output');
+      preview.append(element('p', 'meta', item.outputPreview.blocked ? 'Output blocked: resolve the conversion plan before starting.' : `Planned audio output: ${item.outputPreview.outputs.length} track(s).`));
+      if (!item.outputPreview.blocked) preview.append(element('p', 'meta', item.outputPreview.outputs.map(output => `${output.layout} ${output.role.toLowerCase()}${output.default ? ' (marked default)' : ''}`).join(' + ')));
+      const extra = element('div', 'audio-output-extra'); extra.hidden = !showAudioDetails;
+      for (const output of item.outputPreview.outputs) {
+        extra.append(element('p', 'meta', `${output.ordinal + 1}. ${output.role} · ${label(output.codec)} · ${output.layout}${output.channels ? ` (${output.channels} channels)` : ''} · ${output.language}${output.title ? ` · ${output.title}` : ''}${output.default ? ' · DEFAULT flag' : ''}`));
+      }
+      preview.append(extra);
+      if (!item.outputPreview.blocked) {
+        if (!item.outputPreview.outputs.some(output => output.default)) preview.append(element('p', 'meta', 'No default audio flag is planned; player selection may vary.'));
+        preview.append(element('p', 'meta', 'Planned flags are not a guarantee of player selection. Retained originals may have a different layout; playback-system handling may still be required.'));
+      }
+      body.append(preview);
+    }
     const details = element('details'); details.open = expandedTracks.has(item.id);
+    details.hidden = !showAudioDetails;
     details.append(element('summary', '', `${item.tracks?.length || 0} audio tracks · View conversion plan`));
     details.addEventListener('toggle', () => { if (!details.isConnected) return; if (details.open) expandedTracks.add(item.id); else expandedTracks.delete(item.id); });
     for (const [index, track] of (item.tracks || []).entries()) {
       const row = element('div', `track${track.warning ? ' warning' : ''}`);
-      row.append(element('span', '', `${index + 1}. ${label(track.sourceCodec)} · ${track.sourceLayout || track.layout || `${track.channels || '?'} channels`} · ${track.language}`), element('span', '', `${track.action === 'copy' ? 'Keep original' : `${track.keepOriginal ? 'Keep original + compatibility track ' : ''}→ ${label(track.codec)}${track.sourceLayout ? ` · ${track.layout}` : ''}`} — ${track.reason}`));
+      row.append(element('span', '', `${index + 1}. ${track.sourceProfile || label(track.sourceFormat || track.sourceCodec)} · ${track.sourceLayout || track.layout || `${track.channels || '?'} channels`} · ${track.language}`), element('span', '', `${track.blocked ? 'BLOCKED' : track.action === 'copy' ? 'Keep original' : `${track.keepOriginal ? 'Keep original + additional track ' : ''}${track.action === 'extract' ? 'Extract core →' : '→'} ${label(track.codec)}${track.sourceLayout ? ` · ${track.layout}` : ''}`} — ${track.reason}`));
       details.append(row);
     }
     if (item.tracks?.length) body.append(details);
@@ -133,16 +169,28 @@ function patchCardState(card, item) {
     if (prioritize.parentNode !== card.querySelector('.item-head')) card.querySelector('.item-head').append(prioritize);
   } else prioritize?.remove();
   let progress = card.querySelector('.progress-wrap');
-  if (item.progress !== undefined || ['Converting', 'Verifying', 'Complete'].includes(item.status)) {
+  if (item.progress !== undefined || ['Converting', 'Verifying', 'Publishing', 'Complete'].includes(item.status)) {
     if (!progress) { progress = createProgress(item); card.append(progress); }
     updateProgressNode(progress, item);
   } else if (progress) progress.remove();
-  const messages = JSON.stringify([item.error, item.warnings, item.persistenceWarning, item.tracks?.some(t => t.compatibility === 'unresolved')]);
+  const messages = JSON.stringify([item.error, item.diagnostic, item.conversionReport, item.warnings, item.persistenceWarning, item.tracks?.some(t => t.compatibility === 'unresolved')]);
   if (messages !== previous.messages) {
     let region = card.querySelector('.item-messages');
     if (!region) { region = element('div', 'item-messages'); card.append(region); }
     region.replaceChildren();
     if (item.error) region.append(element('p', 'error', item.error));
+    if (item.diagnostic) {
+      const diagnostics = element('details'); diagnostics.append(element('summary', '', 'Diagnostic report — select and copy to share'));
+      const report = element('textarea', '', item.diagnostic); report.value = item.diagnostic; report.readOnly = true; report.rows = 8;
+      report.setAttribute('aria-label', 'Error diagnostic report'); report.style.width = '100%';
+      report.addEventListener('focus', () => report.select()); diagnostics.append(report); region.append(diagnostics);
+    }
+    if (item.conversionReport) {
+      const diagnostics = element('details'); diagnostics.append(element('summary', '', 'Verified audio mapping — select and copy to share'));
+      const report = element('textarea', '', item.conversionReport); report.value = item.conversionReport; report.readOnly = true; report.rows = 8;
+      report.setAttribute('aria-label', 'Verified audio mapping'); report.style.width = '100%';
+      report.addEventListener('focus', () => report.select()); diagnostics.append(report); region.append(diagnostics);
+    }
     if (item.persistenceWarning) region.append(element('p', 'warning-text', item.persistenceWarning));
     for (const warning of item.warnings || []) region.append(element('p', 'warning-text', warning));
     if (item.tracks?.some(t => t.compatibility === 'unresolved')) region.append(element('p', 'warning-text', 'Some tracks remain incompatible or unconfirmed. Converting this file does not resolve those tracks.'));
@@ -158,7 +206,7 @@ function patchCardState(card, item) {
 function render() {
   const candidates = [...items.values()].filter(i => !i.output && ['Ready', 'Error', 'Cancelled'].includes(i.status) && (i.needsConversion || i.tracks?.some(t => t.action !== 'copy'))).sort((a, b) => (b.priority || 0) - (a.priority || 0));
   runnableCount = candidates.length; firstRunnableId = candidates[0]?.id || '';
-  if (typeof currentPage !== 'undefined' && currentPage !== 'queue') return;
+  if (typeof currentPage !== 'undefined' && currentPage !== 'queue') { updateControls(); return; }
   const queue = $('queue');
   const all = [...items.values()].sort((a, b) => (b.priority || 0) - (a.priority || 0));
   queuePage = Math.max(0, Math.min(queuePage, Math.ceil(all.length / queuePageSize) - 1));
@@ -197,6 +245,10 @@ function render() {
     if (queue.lastElementChild !== nav) queue.append(nav);
   } else nav?.remove();
   $('count').textContent = items.size;
+  updateControls();
+}
+// Busy-state controls must stay current even when queue cards are offscreen.
+function updateControls() {
   const profileOperationPending = typeof managingProfiles !== 'undefined' && managingProfiles;
   const persistencePending = [...items.values()].some(i => i.persistencePending);
   const outputUnavailable = [...items.values()].some(i => i.outputUnavailable);
@@ -212,6 +264,7 @@ function render() {
   $('folder').disabled = recoveryBusy || running || importing;
   $('settings-pick-output').disabled = recoveryBusy || running || importing;
   $('import-folder').disabled = recoveryBusy || running || importing || profileOperationPending;
+  $('drop').setAttribute('aria-disabled', String($('import-folder').disabled));
   $('cancel-import').hidden = !importing;
   $('change-setup').disabled = recoveryBusy || running || importing || profileOperationPending;
   for (const id of ['rename-profile', 'duplicate-profile', 'delete-profile']) $(id).disabled = recoveryBusy || running || importing || profileOperationPending;
@@ -221,7 +274,7 @@ function render() {
 // Safe: receives action. See the return statements below for the result; async results are Promises.
 async function safe(action) { $('message').textContent = ''; try { await action(); } catch (error) { $('message').textContent = error.message; } }
 // Import files: receives action. See the return statements below for the result; async results are Promises.
-async function importFiles(action) { if (running || importing || $('workspace').hidden) return; importing = true; render(); await safe(action); importing = false; render(); }
+async function importFiles(action) { if (running || importing || recoveryBusy || $('workspace').hidden || $('import-folder').disabled) return; importing = true; render(); await safe(action); importing = false; render(); }
 $('drop').addEventListener('click', () => importFiles(() => api.pickFiles()));
 $('import-folder').addEventListener('click', () => importFiles(() => api.pickImportFolder()));
 $('cancel-import').addEventListener('click', () => safe(() => api.cancelImport()));
@@ -246,7 +299,7 @@ api.onUpdate(update => {
   if (update.type === 'queue-warning') $('message').textContent = update.message;
   if (update.type === 'item') items.set(update.item.id, update.item);
   if (update.type === 'status' && items.has(update.id)) Object.assign(items.get(update.id), update);
-  if (update.type === 'status' && ['Converting', 'Verifying'].includes(update.status)) {
+  if (update.type === 'status' && ['Converting', 'Verifying', 'Publishing'].includes(update.status)) {
     patchProgress(update);
     return;
   }

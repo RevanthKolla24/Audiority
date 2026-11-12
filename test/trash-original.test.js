@@ -16,6 +16,21 @@ test('auto-trash defaults off and strictly validates persisted preferences', () 
   for (const value of ['yes', 1, null]) assert.throws(() => validatePreferences({ ...old, trashOriginals: value }));
 });
 
+test('auto-trash retains sources with incomplete persistence, unresolved compatibility or removed streams', async () => {
+  for (const fields of [
+    { persistencePending: true }, { publicationPending: true }, { outputUnavailable: true },
+    { plan: { blocked: true } }, { plan: { unresolved: true } },
+    { plan: { tracks: [{ compatibility: 'unresolved' }] } },
+    { plan: { tracks: [{ compatibility: 'playback-unconfirmed' }] } },
+    { plan: { droppedStreams: [4] } }
+  ]) {
+    const warnings = await trashOriginal({ file: '/not-accessed.mkv', ...fields }, {}, {
+      enabled: true, trashItem: async () => assert.fail('Unsafe source must not be trashed')
+    });
+    assert.match(warnings[0], /Original retained/);
+  }
+});
+
 test('auto-trash calls the OS only for safe successful outputs and reports failures without deleting', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'audiority-trash-'));
   try {
@@ -34,12 +49,13 @@ test('auto-trash calls the OS only for safe successful outputs and reports failu
     const verifiedSidecars = await Promise.all(sidecars.map(async (s, i) => ({ file: s.file, output: copied[i], identity: await sourceIdentity(s.file), hash: await hashFile(s.file) })));
     const withSubtitles = { ...item, sidecars }, withCopies = { ...result, sidecars: copied, verifiedSidecars };
     assert.deepEqual(await trashOriginal(withSubtitles, withCopies, options), []);
-    assert.deepEqual(calls, [file, ...sidecars.map(s => s.file)]); calls = [];
+    assert.deepEqual(calls, [file]); calls = [];
     const partialWarnings = await trashOriginal(withSubtitles, withCopies, { ...options, trashItem: async target => {
       calls.push(target); if (target === sidecars[0].file) throw new Error('Subtitle locked');
     } });
-    assert.deepEqual(calls, [file, ...sidecars.map(s => s.file)]); calls = [];
-    assert.match(partialWarnings[0], /Could not move subtitle source.*Subtitle locked/);
+    assert.deepEqual(calls, [file]); calls = [];
+    assert.deepEqual(partialWarnings, []);
+    for (const sidecar of sidecars) assert.equal(await fs.readFile(sidecar.file, 'utf8'), 'subtitle');
     const aborted = new AbortController();
     await trashOriginal(withSubtitles, withCopies, { ...options, signal: aborted.signal, trashItem: async target => { calls.push(target); aborted.abort(); } });
     assert.deepEqual(calls, [file]); calls = [];
@@ -65,7 +81,7 @@ test('auto-trash retains changed media, changed subtitles and unverified subtitl
   try {
     const file = path.join(dir, 'media.mkv'), output = path.join(dir, 'converted.mkv');
     const subtitle = path.join(dir, 'media.srt'), copy = path.join(dir, 'converted.srt');
-    for (const failure of ['media', 'subtitle', 'copy', 'missing', 'during-trash', 'output', 'output-missing']) {
+    for (const failure of ['media', 'subtitle', 'copy', 'missing', 'output', 'output-missing']) {
       await fs.writeFile(file, 'media'); await fs.writeFile(output, 'output');
       await fs.writeFile(subtitle, 'captions'); await fs.writeFile(copy, 'captions');
       const result = { output, outputSnapshot: await sourceIdentity(output), sidecars: [copy], sourceSnapshot: await sourceIdentity(file),
@@ -80,11 +96,10 @@ test('auto-trash retains changed media, changed subtitles and unverified subtitl
       const warnings = await trashOriginal({ file, sidecars: [{ file: subtitle }] }, result, {
         enabled: true, trashItem: async target => {
           calls.push(target);
-          if (failure === 'during-trash') await fs.writeFile(subtitle, 'edited during media trash');
         }
       });
       assert.ok(warnings.length > 0, failure);
-      assert.deepEqual(calls, failure === 'during-trash' ? [file] : [], failure);
+      assert.deepEqual(calls, [], failure);
     }
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });

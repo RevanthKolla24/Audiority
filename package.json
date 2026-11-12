@@ -1,6 +1,6 @@
 {
   "name": "audiority",
-  "version": "1.1.1",
+  "version": "1.5.0",
   "description": "Local, channel-safe video audio conversion",
   "author": "Audiority contributors",
   "license": "MIT",
@@ -10,11 +10,15 @@
     "test": "node --test test/*.test.js",
     "test:integration": "node --test test/integration.test.js",
     "test:ui": "electron scripts/ui-smoke.js",
+    "test:ui:windows": "electron scripts/ui-smoke.js --windows-layout",
+    "test:restart": "node scripts/restart-acceptance.js",
     "benchmark": "electron scripts/benchmark.js",
+    "benchmark:conversion": "node scripts/benchmark-conversion.js",
     "prepare:tools": "node scripts/prepare-tools.js",
     "pack": "npm run prepare:tools && electron-builder --dir",
     "dist:mac": "npm run prepare:tools -- mac && electron-builder --mac --arm64",
-    "dist:win": "npm run prepare:tools -- win && electron-builder --win --x64"
+    "dist:win": "npm run prepare:tools -- win && npm run prepare:icons && electron-builder --win --x64",
+    "prepare:icons": "electron scripts/prepare-icon.js"
   },
   "dependencies": {
     "electron-updater": "6.8.9",
@@ -22,7 +26,7 @@
     "ffprobe-static": "3.1.0"
   },
   "devDependencies": {
-    "electron": "44.5.1",
+    "electron": "44.11.1",
     "electron-builder": "26.15.3"
   },
   "build": {
@@ -87,6 +91,9 @@
       "license": "build/license.txt"
     },
     "nsis": {
+      "include": "build/installer.nsh",
+      "artifactName": "Audiority-Setup-${version}.${ext}",
+      "packElevateHelper": true,
       "installerIcon": "build/icon.ico",
       "uninstallerIcon": "build/icon.ico",
       "oneClick": false,

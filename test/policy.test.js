@@ -47,7 +47,7 @@ test('encoder capabilities are parsed from installed binary help', () => {
 test('verification rejects lost channels and changed copied video', () => {
   const stream = audio('flac');
   const item = { duration: 2, probe: { streams: [{ codec_type: 'video', codec_name: 'h264' }, stream] }, plan: { tracks: [planTrack(stream, caps)] } };
-  const output = { streams: [{ codec_type: 'video', codec_name: 'h264' }, { ...stream, codec_name: 'dts' }], format: { duration: '2' } };
+  const output = { streams: [{ codec_type: 'video', codec_name: 'h264' }, { ...stream, codec_name: 'dts', disposition: { default: 1 } }], format: { duration: '2' } };
   verifyOutput(item, output);
   assert.throws(() => verifyOutput(item, { ...output, streams: [output.streams[0], { ...output.streams[1], channels: 2 }] }), /channel count/);
   assert.throws(() => verifyOutput(item, { ...output, streams: [{ codec_type: 'video', codec_name: 'hevc' }, output.streams[1]] }), /copied stream/);

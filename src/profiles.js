@@ -14,7 +14,13 @@ function validateLanguages(value) {
 }
 function validateSettings(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid playback settings.');
-  const v = { ...defaultSettings(), ...value };
+  const v = { ...defaultSettings(), conversionMode: 'playback', retentionMode: 'inherit', languageMode: 'inherit', speakerLayout: 'unknown', layoutPolicy: 'legacy', ...value };
+  if (!['unknown', 'stereo', '3.1', '5.1(side)', '7.1'].includes(v.speakerLayout)) throw new Error('Invalid installed speaker layout.');
+  if (!['legacy', 'receiver', 'fixed'].includes(v.layoutPolicy)) throw new Error('Invalid system layout policy.');
+  if (v.conversionMode === 'playback' && v.layoutPolicy === 'fixed' && !['stereo', '3.1', '5.1(side)'].includes(v.speakerLayout)) throw new Error('Fixed-layout output requires confirmed stereo, 3.1 or 5.1(side) speakers. Use playback-system layout management for 7.1.');
+  if (!['playback', 'manual', 'dts-core'].includes(v.conversionMode)) throw new Error('Invalid conversion mode.');
+  if (!['inherit', 'keep', 'replace'].includes(v.retentionMode)) throw new Error('Invalid original audio setting.');
+  if (!['inherit', 'all', 'custom'].includes(v.languageMode)) throw new Error('Invalid language setting.');
   v.allowedLanguages = validateLanguages(value.allowedLanguages ?? []);
   v.keepDefaultTrack = value.keepDefaultTrack ?? true;
   if (typeof v.keepDefaultTrack !== 'boolean') throw new Error('Invalid keepDefaultTrack.');
@@ -37,7 +43,7 @@ function validateSettings(value) {
     downmixSeen.add(rule.source);
     return { source: rule.source, target: rule.target };
   });
-  if (!v.receiverId && !v.advanced) throw new Error('Select a receiver or enable custom setup.');
+  if (!v.receiverId && !v.advanced && v.conversionMode === 'playback') throw new Error('Select a receiver or enable custom setup.');
   for (const key of ['allowed', 'pathCodecs']) {
     const choices = key === 'allowed' ? FORMATS : ['ac3', 'eac3', 'dts', 'dtshd', 'truehd', 'pcm'];
     if (!Array.isArray(v[key]) || !v[key].length || v[key].some(c => !choices.includes(c)) || new Set(v[key]).size !== v[key].length) throw new Error(`Select valid ${key} formats.`);
@@ -57,9 +63,9 @@ function validateSettings(value) {
     if (seen.has(key)) throw new Error('Duplicate custom rule.'); seen.add(key);
     return { source: rule.source, scope: rule.scope, target: rule.target };
   });
-  if (v.receiverId && receivers.find(r => r.id === v.receiverId).status === 'directory-only' && !v.advanced) throw new Error('This receiver has no verified preset. Enable Advanced and confirm its formats.');
+  if (v.conversionMode === 'playback' && v.receiverId && receivers.find(r => r.id === v.receiverId).status === 'directory-only' && !v.advanced) throw new Error('This receiver has no verified preset. Enable Advanced and confirm its formats.');
   // Whitelist stored properties: never trust renderer-supplied effective capabilities.
-  return Object.fromEntries([...Object.keys(defaultSettings()), 'normalizeVolume', 'keepOriginal', 'allowedLanguages', 'keepDefaultTrack'].map(key => [key, v[key]]));
+  return Object.fromEntries([...Object.keys(defaultSettings()), 'conversionMode', 'retentionMode', 'languageMode', 'speakerLayout', 'layoutPolicy', 'normalizeVolume', 'keepOriginal', 'allowedLanguages', 'keepDefaultTrack'].map(key => [key, v[key]]));
 }
 // Accepts profile settings; returns effective formats/limits and warnings for receiver, player and connection together.
 function resolveProfile(settings) {
@@ -67,11 +73,11 @@ function resolveProfile(settings) {
   const receiver = receivers.find(r => r.id === s.receiverId);
   const device = devices.find(d => d.id === s.deviceId);
   const warnings = [];
-  const receiverCodecs = s.advanced ? s.allowed : receiver.codecs;
+  const receiverCodecs = s.advanced ? s.allowed : receiver?.codecs || [];
   let pathCodecs = s.pathConfirmed ? s.pathCodecs : device.codecs || ['pcm'];
   if (!s.pathConfirmed) warnings.push('Playback app/file support is not confirmed. Device specifications are only an output-format upper bound.');
   if (!s.pathConfirmed && !device.codecs) warnings.push('Unknown playback device: only stereo PCM is assumed; confirm formats to enable surround conversion.');
-  if (!s.advanced && receiver?.status !== 'documented') warnings.push(receiver.note);
+  if (!s.advanced && receiver && receiver.status !== 'documented') warnings.push(receiver.note);
   if (s.advanced) warnings.push('Custom receiver capabilities are user-confirmed, not manufacturer-verified.');
   if (s.passthrough !== 'enabled') {
     pathCodecs = pathCodecs.filter(c => c === 'pcm');
@@ -83,15 +89,21 @@ function resolveProfile(settings) {
   }
   if (s.connection === 'unknown') { pathCodecs = pathCodecs.filter(c => c === 'pcm'); warnings.push('Unknown connection: only stereo PCM assumed.'); }
   if (['arc', 'optical', 'coaxial'].includes(s.connection)) pathCodecs = pathCodecs.filter(c => ['ac3', 'dts', 'pcm'].includes(c));
-  if (!s.advanced && receiver.connections.length && !receiver.connections.includes(s.connection)) {
+  if (!s.advanced && receiver?.connections.length && !receiver.connections.includes(s.connection)) {
     pathCodecs = []; warnings.push('Selected connection is not in this receiver preset. Confirm a custom setup before converting.');
   }
   const supported = receiverCodecs.filter(c => pathCodecs.includes(c));
-  const allowed = FORMATS.filter(c => supported.includes(c) && (!s.advanced || s.allowed.includes(c)));
+  const allowed = s.conversionMode === 'playback' ? FORMATS.filter(c => supported.includes(c) && (!s.advanced || s.allowed.includes(c))) : s.conversionMode === 'dts-core' ? ['dts'] : s.allowed;
+  if (s.conversionMode !== 'playback') {
+    warnings.length = 0;
+    warnings.push('Explicit conversion mode: output requests are independent of playback capabilities. Playback compatibility is not confirmed.');
+  }
   if (!allowed.length) warnings.push('No safe output format is enabled for this playback path. Tracks will be flagged unresolved.');
-  const pcmBits = Math.min(s.pcmBits, s.advanced ? s.pcmBits : receiver.pcmBits);
-  const pcmRate = Math.min(s.pcmRate, s.advanced ? s.pcmRate : receiver.pcmRate, ['arc', 'optical', 'coaxial', 'unknown'].includes(s.connection) ? 48000 : 192000);
-  return { settings: s, dialogueBoost: s.dialogueBoost, allowedLanguages: s.allowedLanguages, keepDefaultTrack: s.keepDefaultTrack, keepOriginal: s.keepOriginal, name: receiver?.name || 'Custom receiver', supported, allowed, preserve: s.preserve, extractDtsCore: s.extractDtsCore, allowDownmix: s.allowDownmix, downmixRules: s.downmixRules, excludedFormats: s.excludedFormats, lossless: s.lossless, lossy: s.lossy, stereo: s.stereo, rules: s.advanced ? s.rules : [], ac3Bitrate: s.ac3Bitrate, dtsBitrate: s.dtsBitrate, pcmBits, pcmRate, warnings };
+  const systemPolicy = require('./system-audio-policy').systemAudioPolicy(s);
+  if (s.layoutPolicy !== 'legacy') warnings.push(s.conversionMode === 'playback' ? systemPolicy.explanation : 'System-aware layout policy is inactive in explicit conversion modes; stored explicit layout rules apply.');
+  const pcmBits = s.conversionMode !== 'playback' ? s.pcmBits : Math.min(s.pcmBits, s.advanced ? s.pcmBits : receiver.pcmBits);
+  const pcmRate = s.conversionMode !== 'playback' ? s.pcmRate : Math.min(s.pcmRate, s.advanced ? s.pcmRate : receiver.pcmRate, ['arc', 'optical', 'coaxial', 'unknown'].includes(s.connection) ? 48000 : 192000);
+  return { settings: s, speakerLayout: s.speakerLayout, layoutPolicy: s.layoutPolicy, systemExplanation: s.conversionMode === 'playback' ? systemPolicy.explanation : '', conversionMode: s.conversionMode, retentionMode: s.retentionMode, languageMode: s.languageMode, dialogueBoost: s.dialogueBoost, allowedLanguages: s.allowedLanguages, keepDefaultTrack: s.keepDefaultTrack, keepOriginal: s.keepOriginal, name: receiver?.name || 'Custom receiver', supported, allowed, preserve: s.conversionMode === 'playback' ? systemPolicy.preserve : s.preserve, extractDtsCore: s.extractDtsCore, allowDownmix: s.conversionMode === 'playback' ? systemPolicy.allowDownmix : s.allowDownmix, downmixRules: s.conversionMode === 'playback' ? systemPolicy.downmixRules : s.downmixRules, excludedFormats: s.excludedFormats, lossless: s.lossless, lossy: s.lossy, stereo: s.stereo, rules: s.advanced || s.conversionMode === 'manual' ? s.rules : [], ac3Bitrate: s.ac3Bitrate, dtsBitrate: s.dtsBitrate, pcmBits, pcmRate, warnings };
 }
 // Source format: receives stream. Returns the calculated value for the caller.
 function sourceFormat(stream) {

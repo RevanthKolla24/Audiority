@@ -45,7 +45,9 @@ Dialogue: 0,0:00:00.00,0:00:01.00,Signs,,0,0,0,,{\\pos(320,45)\\fad(100,100)\\bo
       '-map', '0:v', '-map', '1:a', '-map', '2:s', '-c:v', 'mpeg4', '-c:a', 'flac', '-c:s', 'copy',
       '-attach', font, '-metadata:s:t:0', 'mimetype=application/x-truetype-font', '-t', '1', input]);
     const item = await engine.inspect(input);
-    const result = await engine.convert(item, dir);
+    const stages = [];
+    const result = await engine.convert(item, dir, { onStage: stage => stages.push(stage) });
+    assert.deepEqual(stages, ['Converting', 'Verifying', 'Publishing']);
     await engine.verifyVideo(item, result.output);
     await engine.verifySubtitles(item, result.output);
     const output = await engine.probe(result.output);

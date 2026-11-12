@@ -11,7 +11,7 @@ function comparePriority(a, b) {
 function nextQueueItem(items, attempted) {
   let next;
   for (const item of items.values()) {
-    if (attempted.has(item.id) || item.output || !item.plan?.needsConversion || !['Ready', 'Error', 'Cancelled'].includes(item.status)) continue;
+    if (attempted.has(item.id) || item.output || item.plan?.blocked || !item.plan?.needsConversion || !['Ready', 'Error', 'Cancelled'].includes(item.status)) continue;
     if (!next || comparePriority(item, next) < 0) next = item;
   }
   return next;

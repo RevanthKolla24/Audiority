@@ -117,7 +117,7 @@ test('settings persist locally and malformed files return safe onboarding state'
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'audiority-settings-'));
   try {
     assert.equal((await loadSettings(directory)).settings, null);
-    await saveSettings(directory, settings()); assert.deepEqual((await loadSettings(directory)).settings, settings());
+    await saveSettings(directory, settings()); assert.deepEqual((await loadSettings(directory)).settings, validateSettings(settings()));
     await fs.writeFile(path.join(directory, 'playback-profile.json'), '{broken');
     const loaded = await loadSettings(directory); assert.equal(loaded.settings, null); assert.match(loaded.warning, /setup again/);
   } finally { await fs.rm(directory, { recursive: true, force: true }); }

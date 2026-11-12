@@ -14,7 +14,7 @@ test('restart cleanup refreshes identities only for verified hard-linked outputs
     const temp = path.join(dir, '.movie.12345678-1234-1234-1234-123456789abc.partial.mkv');
     await fs.writeFile(temp, 'verified media'); await fs.link(temp, output);
     const item = { id: 'job', file: path.join(dir, 'original.mkv'), output, temporaryOutput: temp,
-      status: 'Complete', outputSnapshot: await sourceIdentity(output) };
+      status: 'Complete', outputSnapshot: await sourceIdentity(output), temporaryOutputSnapshot: await sourceIdentity(temp) };
     await saveQueue(dir, new Map([[item.id, item]]));
     const restored = (await loadQueue(dir)).state.items;
     assert.equal(await cleanupOrphanedTempFiles(dir, { items: restored }), 1);
@@ -28,6 +28,7 @@ test('restart cleanup refreshes identities only for verified hard-linked outputs
     await fs.link(output, temp);
     restored[0].outputSnapshot = await sourceIdentity(output);
     restored[0].status = 'Converting';
+    restored[0].temporaryOutputSnapshot = await sourceIdentity(temp);
     assert.deepEqual(await cleanupInterrupted(restored), []);
     assert.equal(await validOutput(output, restored[0].outputSnapshot), true);
 

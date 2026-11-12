@@ -22,6 +22,7 @@ function matrixState(value, row) {
   if (excluded.length) return 'auto';
   if (!rules.length) return row.id === 'dtshd' && value.extractDtsCore ? 'core' : 'auto';
   const target = rules[0].target;
+  if (row.id === 'dtshd' && value.extractDtsCore && rules.length === 1 && rules[0].scope === 'any' && target === 'dts') return 'core';
   if (!row.actions.includes(target) || target === 'copy' || rules.length !== row.sources.length ||
       !row.sources.every(source => rules.some(rule => rule.source === source && rule.scope === row.scope && rule.target === target)) ||
       row.id === 'dtshd' && value.extractDtsCore) return 'auto';
@@ -33,28 +34,25 @@ function refreshMatrix(value) {
 }
 // Apply matrix: receives row, action. Updates state or visible controls; callers use the side effect.
 function applyMatrix(row, action) {
-  // Automatic deliberately leaves the explicit editors unchanged. They are
-  // the schema-backed source of truth, so repeated previews never add rules.
-  if (action === 'auto') return;
   for (const input of $('excluded-formats').querySelectorAll('input')) {
     if (row.sources.includes(input.value)) input.checked = action === 'copy';
   }
   if (row.id === 'dtshd') $('extract-dts-core').checked = action === 'core';
-  // Only replace this row's scope. Preserve more specific legacy overrides.
+  // A matrix selection owns every override for its source formats.
   for (const node of [...$('rule-list').children]) {
-    if (row.sources.includes(node.querySelector('[data-field="source"]').value) &&
-        node.querySelector('[data-field="scope"]').value === row.scope) node.remove();
+    if (row.sources.includes(node.querySelector('[data-field="source"]').value)) node.remove();
   }
-  if (['ac3', 'dts', 'pcm'].includes(action)) {
-    for (const source of row.sources) ruleRow({ source, scope: row.scope, target: action });
-    $('allowed-formats').querySelector(`input[value="${action}"]`).checked = true;
+  if (['ac3', 'dts', 'pcm', 'core'].includes(action)) {
+    const target = action === 'core' ? 'dts' : action;
+    for (const source of row.sources) ruleRow({ source, scope: row.scope, target });
+    $('allowed-formats').querySelector(`input[value="${target}"]`).checked = true;
     if (row.id === 'lossless') $('lossless-target').value = action;
     if (row.id === 'other') { $('lossy-target').value = action; $('stereo-target').value = action; }
   }
   refreshMatrix(readDraft());
 }
 for (const row of matrixRows) {
-  const names = { auto: 'Automatic / existing overrides', copy: 'Keep original', core: 'Extract compatible DTS core', ac3: 'Convert to AC-3', dts: 'Convert to DTS', pcm: 'Convert to PCM stereo' };
+  const names = { auto: 'Automatic (reset overrides)', copy: 'Keep original', core: 'Extract compatible DTS core', ac3: 'Convert to AC-3', dts: 'Convert to DTS', pcm: 'Convert to PCM stereo' };
   selectOptions($('matrix-' + row.id), ['auto', ...row.actions].map(action => [action, names[action]]), 'auto');
   $('matrix-' + row.id).addEventListener('change', event => applyMatrix(row, event.target.value));
 }
@@ -86,8 +84,9 @@ function receiverDetail() {
     detail.append(element('strong', '', receiver.name), element('p', '', `${receiver.status === 'documented' ? 'Documented preset' : receiver.status === 'user-reported' ? 'User-reported preset' : 'Directory only · custom confirmation required'}${receiver.codecs.length ? ` · ${receiver.codecs.map(c => formatNames[c] || c).join(', ')}` : ''}`), element('p', '', receiver.note));
     showSources(detail, receiver.sources);
   } else detail.textContent = 'Custom receiver: enable Advanced and confirm your receiver’s supported formats.';
-  $('receiver-next').disabled = !selectedReceiver && !$('advanced-enabled').checked || receiver?.status === 'directory-only' && !$('advanced-enabled').checked;
-  $('receiver-help').textContent = receiver?.status === 'directory-only' ? 'This model requires Advanced capability confirmation.' : 'Settings stay on this computer.';
+  const playback = $('conversion-mode').value === 'playback';
+  $('receiver-next').disabled = playback && ((!selectedReceiver || receiver?.status === 'directory-only') && !$('advanced-enabled').checked);
+  $('receiver-help').textContent = !playback ? 'Receiver capabilities are not required for explicit conversion.' : receiver?.status === 'directory-only' ? 'This model requires Advanced capability confirmation.' : 'Settings stay on this computer.';
 }
 // Search receivers: receives no explicit arguments (uses current state). See the return statements below for the result; async results are Promises.
 function searchReceivers() {
@@ -134,15 +133,21 @@ $('matrix-panel').addEventListener('change', event => {
 // Accepts settings; fills controls and derives matrix summaries without discarding specific overrides.
 function fillDraft(value) {
   draft = structuredClone(value); selectedReceiver = draft.receiverId;
+  $('conversion-mode').value = value.conversionMode || 'playback';
+  $('retention-mode').value = value.retentionMode || 'inherit';
+  $('language-mode').value = value.languageMode || 'inherit';
   $('avr-search').value = setupData.receivers.find(r => r.id === selectedReceiver)?.name || '';
   $('advanced-enabled').checked = draft.advanced; $('matrix-panel').open = true;
   checkboxes('allowed-formats', ['dts', 'ac3', 'pcm'], draft.allowed);
   $('preserve-supported').checked = draft.preserve;
   $('extract-dts-core').checked = draft.extractDtsCore ?? true;
   $('allow-downmix').checked = draft.allowDownmix ?? false;
+  $('speaker-layout').value = draft.speakerLayout || 'unknown';
+  $('layout-policy').value = draft.layoutPolicy || 'legacy';
   $('profile-allowedLanguages').value = (draft.allowedLanguages || []).join(', ');
   $('profile-keepDefaultTrack').checked = draft.keepDefaultTrack ?? true;
   $('profile-normalize').checked = draft.normalizeVolume ?? false;
+  $('profile-dialogue-boost').checked = draft.dialogueBoost ?? false;
   $('profile-keep-original').checked = draft.keepOriginal ?? false;
   checkboxes('excluded-formats', sourceNames, draft.excludedFormats || []);
   $('downmix-list').replaceChildren(); (draft.downmixRules || [{ source: '7.1', target: '5.1(side)' }]).forEach(downmixRow);
@@ -155,14 +160,33 @@ function fillDraft(value) {
   $('player-app').value = draft.player; $('tv-model').value = draft.tv; $('path-confirmed').checked = draft.pathConfirmed;
   checkboxes('path-formats', ['ac3', 'dts', 'pcm', 'eac3', 'dtshd', 'truehd'], draft.pathCodecs);
   receiverDetail(); deviceDetail();
+  updatePolicyControls();
 }
+// Disable only inactive controls; their stored values survive policy switching.
+function updatePolicyControls() {
+  const retention = $('retention-mode').value;
+  $('profile-keep-original').disabled = retention !== 'inherit';
+  $('retention-help').textContent = retention === 'inherit' ? 'Inherited: either the profile checkbox or global retention preference keeps originals alongside converted tracks.' : retention === 'keep' ? 'Always retain: output includes originals plus converted tracks. Overrides the global preference and inactive profile checkbox.' : 'Replace: output uses converted tracks instead of their originals. Overrides global retention; does not delete the source file.';
+  const active = $('conversion-mode').value === 'manual' || ($('conversion-mode').value === 'playback' && $('layout-policy').value === 'legacy');
+  $('allow-downmix').disabled = !active;
+  $('add-downmix').disabled = !active;
+  for (const control of $('downmix-list').querySelectorAll('select, button')) control.disabled = !active;
+  $('layout-rules-help').textContent = active ? 'Explicit layout rules are active when enabled below.' : 'These explicit rules are stored but inactive. The selected system-aware policy or DTS-core-only workflow controls layout handling.';
+}
+for (const id of ['retention-mode', 'layout-policy', 'conversion-mode']) $(id).addEventListener('change', updatePolicyControls);
 // Reads schema-backed form controls; returns settings preserving manual rules and layout mappings.
 function readDraft() {
+  draft.conversionMode = $('conversion-mode').value;
+  draft.retentionMode = $('retention-mode').value;
+  draft.languageMode = $('language-mode').value;
   draft.extractDtsCore = $('extract-dts-core').checked;
   draft.allowDownmix = $('allow-downmix').checked;
+  draft.speakerLayout = $('speaker-layout').value;
+  draft.layoutPolicy = $('layout-policy').value;
   draft.allowedLanguages = $('profile-allowedLanguages').value.split(',').map(s => s.trim()).filter(Boolean);
   draft.keepDefaultTrack = $('profile-keepDefaultTrack').checked;
   draft.normalizeVolume = $('profile-normalize').checked;
+  draft.dialogueBoost = $('profile-dialogue-boost').checked;
   draft.keepOriginal = $('profile-keep-original').checked;
   draft.excludedFormats = checked('excluded-formats');
   draft.downmixRules = [...$('downmix-list').children].map(row => Object.fromEntries([...row.querySelectorAll('select')].map(select => [select.dataset.field, select.value])));
@@ -176,14 +200,23 @@ function deviceDetail() {
 }
 // Profile text: receives profile. Returns the calculated value for the caller.
 function profileText(profile) {
+  if (profile.conversionMode === 'dts-core') return 'DTS-core only · other audio copied unchanged · playback unconfirmed';
+  if (profile.conversionMode === 'manual') return `Explicit formats · ${profile.allowed.map(c => formatNames[c]).join(' / ')} · playback unconfirmed`;
   return `${profile.name} · ${profile.allowed.map(c => formatNames[c]).join(' / ') || 'No safe target enabled'} · PCM ≤ ${profile.pcmBits}-bit / ${profile.pcmRate / 1000} kHz`;
+}
+function effectivePolicyText(profile) {
+  const global = typeof preferencesData !== 'undefined' ? preferencesData?.preferences : null;
+  const retain = profile.retentionMode === 'replace' ? 'replace converted tracks (profile overrides global)' : profile.retentionMode === 'keep' ? 'retain originals (profile)' : profile.keepOriginal ? 'retain originals (legacy profile)' : global?.keepOriginal ? 'retain originals (global)' : 'replace converted tracks (inherited defaults)';
+  const languages = profile.languageMode === 'all' ? 'all languages (profile overrides global)' : profile.languageMode === 'custom' ? `${profile.allowedLanguages.join(', ') || 'all languages'} (profile)` : profile.allowedLanguages.length ? `${profile.allowedLanguages.join(', ')} (legacy profile)` : `${global?.allowedLanguages?.join(', ') || 'all languages'} (global/default)`;
+  const system = profile.layoutPolicy && profile.layoutPolicy !== 'legacy' ? ` Installed speakers: ${profile.speakerLayout}. ${profile.systemExplanation || 'System layout policy inactive in explicit conversion mode.'}` : '';
+  return `Effective policy: ${retain}; ${languages}. Normalization: ${profile.settings?.normalizeVolume || global?.normalizeVolume ? 'enabled for encoded audio only' : 'off'}.${system}`;
 }
 // Preview profile: receives no explicit arguments (uses current state). See the return statements below for the result; async results are Promises.
 async function previewProfile() {
   const version = ++previewVersion;
   try {
     const profile = await api.previewProfile(readDraft()); if (version !== previewVersion) return;
-    $('profile-preview').replaceChildren(element('strong', '', profileText(profile)), ...profile.warnings.map(w => element('p', 'warning-text', w)));
+    $('profile-preview').replaceChildren(element('strong', '', profileText(profile)), element('p', 'notice', effectivePolicyText(profile)), ...profile.warnings.map(w => element('p', 'warning-text', w)));
     $('setup-save').disabled = false;
   } catch (error) { if (version === previewVersion) { $('profile-preview').textContent = error.message; $('setup-save').disabled = true; } }
 }
@@ -194,12 +227,16 @@ function showStep(step) {
   if (step === 2) { deviceDetail(); previewProfile(); $('media-platform').focus(); } else $('avr-search').focus();
 }
 // Enter workspace: receives profile. See the return statements below for the result; async results are Promises.
+let profileEditing = false;
 function enterWorkspace(profile) {
+  profileEditing = false;
   if ($('advanced-rules-dialog').open) $('advanced-rules-dialog').close();
   if (typeof showPage === 'function') showPage('queue');
   $('setup').hidden = true; $('workspace').hidden = false;
   $('view-title').textContent = 'Conversion queue';
-  $('active-profile').textContent = profileText(profile);
+  $('active-profile').textContent = `${profileText(profile)} · ${effectivePolicyText(profile)}`;
+  $('profile-policy-detail').textContent = effectivePolicyText(profile);
+  if (api.platform === 'win32') $('active-profile').textContent = profileText(profile);
   $('active-warnings').replaceChildren(...profile.warnings.map(w => element('p', 'warning-text', w)));
   $('active-warnings').hidden = !profile.warnings.length;
   $('warning-panel').hidden = !profile.warnings.length;
@@ -211,9 +248,10 @@ function enterWorkspace(profile) {
 // Open setup: receives newProfile = false. Updates state or visible controls; callers use the side effect.
 function openSetup(newProfile = false) {
   if ($('advanced-rules-dialog').open) $('advanced-rules-dialog').close();
-  if (running || importing || managingProfiles || !setupData) return;
+  if (running || importing || recoveryBusy || managingProfiles || profileEditing || !setupData) return;
   if (typeof showPage === 'function') showPage('queue');
   editingId = newProfile ? null : setupData.library.activeId;
+  profileEditing = true;
   const record = setupData.library.profiles.find(p => p.id === editingId);
   $('profile-name').value = record?.name || '';
   $('view-title').textContent = record ? 'Edit playback profile' : 'Create a playback profile';
@@ -242,8 +280,19 @@ $('advanced-rules-dialog').addEventListener('close', () => {
 $('custom-receiver').addEventListener('click', () => { selectedReceiver = ''; $('avr-search').value = ''; $('advanced-enabled').checked = true; $('matrix-panel').open = true; receiverDetail(); $('advanced-rules-dialog').showModal(); });
 $('advanced-enabled').addEventListener('change', receiverDetail);
 $('add-rule').addEventListener('click', () => { if ($('rule-list').children.length < 40) ruleRow(); });
-$('reset-advanced').addEventListener('click', () => { const current = readDraft(); fillDraft({ ...setupData.defaults, receiverId: current.receiverId, advanced: current.advanced, platform: current.platform, deviceId: current.deviceId, player: current.player, connection: current.connection, tv: current.tv, passthrough: current.passthrough, pathConfirmed: current.pathConfirmed, pathCodecs: current.pathCodecs }); });
+$('reset-advanced').addEventListener('click', () => {
+  const current = readDraft();
+  const preserve = ['conversionMode', 'retentionMode', 'languageMode', 'allowedLanguages', 'keepDefaultTrack', 'keepOriginal', 'normalizeVolume', 'dialogueBoost', 'receiverId', 'advanced', 'platform', 'deviceId', 'player', 'connection', 'tv', 'passthrough', 'pathConfirmed', 'pathCodecs'];
+  fillDraft({ ...setupData.defaults, ...Object.fromEntries(preserve.map(key => [key, current[key]])) });
+  previewProfile();
+});
 $('receiver-next').addEventListener('click', () => showStep(2));
+$('conversion-mode').addEventListener('change', () => {
+  receiverDetail();
+  if ($('conversion-mode').value === 'dts-core') $('workflow-help').textContent = 'Only DTS-HD tracks will have a verified DTS core extracted. Other audio is copied, never converted. Subtitle/font handling follows the effective language policy. Playback compatibility remains unconfirmed.';
+  else $('workflow-help').textContent = $('conversion-mode').value === 'manual' ? 'Explicit formats use the enabled output formats and conversion rules, independently of playback capability claims. Review every track before starting.' : 'Playback mode restricts output to the configured receiver, device and connection. Unknown paths may leave surround tracks unresolved.';
+  previewProfile();
+});
 $('playback-back').addEventListener('click', () => showStep(1));
 $('playback-page').addEventListener('change', () => { deviceDetail(); previewProfile(); });
 $('playback-page').addEventListener('input', event => { if (event.target.id !== 'device-search') previewProfile(); });
@@ -274,7 +323,7 @@ let profileRenderSignature = '';
 // Render profiles: receives no explicit arguments (uses current state). Updates state or visible controls; callers use the side effect.
 function renderProfiles() {
   if (!setupData) return;
-  const signature = JSON.stringify([setupData.library, $('profile-search').value, running, importing, managingProfiles, $('setup').hidden]);
+  const signature = JSON.stringify([setupData.library, $('profile-search').value, running, importing, recoveryBusy, managingProfiles, $('setup').hidden]);
   if (signature === profileRenderSignature) return;
   profileRenderSignature = signature;
   const list = $('profile-list'); list.replaceChildren();
@@ -284,12 +333,12 @@ function renderProfiles() {
     button.setAttribute('aria-pressed', String(record.id === setupData.library.activeId));
     button.dataset.id = record.id;
     button.append(element('strong', '', record.name), element('small', '', `${record.settings.platform === 'local' ? 'Local playback' : record.settings.platform} · ${record.settings.connection.toUpperCase()}`));
-    button.disabled = running || importing || managingProfiles || !$('setup').hidden;
+    button.disabled = running || importing || recoveryBusy || managingProfiles || !$('setup').hidden;
     button.addEventListener('click', () => safe(() => performProfile({ type: 'switch', id: record.id })));
     list.append(button);
   }
   $('profile-count').textContent = setupData.library.profiles.length;
-  $('new-profile').disabled = running || importing || managingProfiles || !$('setup').hidden;
+  $('new-profile').disabled = running || importing || recoveryBusy || managingProfiles || !$('setup').hidden;
 }
 // Perform profile: receives action. See the return statements below for the result; async results are Promises.
 async function performProfile(action) {
@@ -299,6 +348,7 @@ async function performProfile(action) {
     setupData = await api.profileOperation(action); savedSettings = setupData.settings;
     if (savedSettings) enterWorkspace(setupData.profile);
     else {
+      profileEditing = false;
       editingId = null; $('profile-name').value = '';
       fillDraft(setupData.defaults); $('workspace').hidden = true; $('setup').hidden = false;
       $('setup-cancel').hidden = true; $('view-title').textContent = 'Create a playback profile'; showStep(1);

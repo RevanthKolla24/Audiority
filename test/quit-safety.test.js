@@ -54,7 +54,7 @@ test('completed conversions survive failed recovery saves and retry without conv
   const source = fs.readFileSync(path.join(__dirname, '../src/main.js'), 'utf8');
   let handler, conversions = 0, trashes = 0, failSave = true;
   const statuses = [];
-  const item = { id: 'job', status: 'Ready' }, items = new Map([['job', item]]);
+  const item = { id: 'job', status: 'Ready', plan: { needsConversion: true, tracks: [] } }, items = new Map([['job', item]]);
   const context = vm.createContext({
     handle: (_name, fn) => { handler = fn; }, running: false, profileBusy: false, appStateBusy: false,
     importing: false, settings: {}, outputDirectory: '/output', resumeQueue() {}, AbortController,
@@ -111,7 +111,7 @@ test('shutdown waits for profile, settings and appearance saves before quitting'
 test('publication persistence failure preserves verified media and stops finalization', async () => {
   const source = fs.readFileSync(path.join(__dirname, '../src/main.js'), 'utf8');
   let handler, savedPublication = false;
-  const item = { id: 'job', status: 'Ready' };
+  const item = { id: 'job', status: 'Ready', plan: { needsConversion: true, tracks: [] } };
   const context = vm.createContext({
     handle: (_channel, fn) => { handler = fn; }, running: false, importing: false, profileBusy: false, appStateBusy: false,
     settings: {}, outputDirectory: '/output', resumeQueue() {}, AbortController, performance,
@@ -187,11 +187,11 @@ test('clear is rejected throughout delayed recovery saves and profile operations
   vm.runInContext(source.slice(source.indexOf("handle('start',"), source.indexOf('  window.loadFile(page)')), context);
   const operation = handlers.start();
   assert.equal(context.appStateBusy, true);
-  assert.throws(() => handlers.clear(), /busy/);
+  await assert.rejects(handlers.clear(), /busy/);
   assert.equal(context.items.size, 1);
   release(); await operation;
   context.profileBusy = true;
-  assert.throws(() => handlers.clear(), /busy/);
+  await assert.rejects(handlers.clear(), /busy/);
   context.profileBusy = false;
   await handlers.clear();
   assert.equal(context.items.size, 0);
@@ -224,7 +224,7 @@ test('queue lifecycle unlocks after sleep-blocker start, stop or persistence err
         start() { if (failure === 'start') throw new Error('start failed'); return 1; },
         stop() { if (failure === 'stop') throw new Error('stop failed'); }
       },
-      nextQueueItem: () => null, items: new Map(),
+      nextQueueItem: () => null, items: new Map([['job', { status: 'Ready', plan: { needsConversion: true } }]]),
       persistQueue: async () => { saves++; if (failure === 'save') throw new Error('save failed'); }
     });
     vm.runInContext(source.slice(source.indexOf("handle('start',"), source.indexOf('  window.loadFile(page)')), context);

@@ -10,7 +10,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { sameSource, validateIdentity } = require('./source-safety');
 
-const preferencesDefaults = () => ({ version: 1, watchFolder: "", watchEnabled: false, trashOriginals: false, allowedLanguages: [], keepDefaultTrack: true, keepOriginal: false, normalizeVolume: false, dialogueBoost: false, clearCompletedOnRestart: false, rememberOutput: true, outputDirectory: '', preserveFolders: true, outputSuffix: '.audiority', threads: 0, inspectionConcurrency: 2, preventSleep: true, compact: false, reducedMotion: false, statsEnabled: true, storeFilenames: false });
+const preferencesDefaults = () => ({ version: 1, watchFolder: "", watchEnabled: false, trashOriginals: false, allowedLanguages: [], keepDefaultTrack: true, keepOriginal: false, normalizeVolume: false, dialogueBoost: false, clearCompletedOnRestart: false, rememberOutput: true, outputDirectory: '', preserveFolders: true, outputSuffix: '.audiority', performanceMode: 'balanced', threads: 0, inspectionConcurrency: 2, preventSleep: true, compact: false, reducedMotion: false, statsEnabled: true, storeFilenames: false });
 // Validate preferences: receives value. Returns checked data or throws; do not trust saved/input JSON blindly.
 function validatePreferences(value) {
   if (!value || value.version !== 1) throw new Error('Invalid application settings.');
@@ -35,8 +35,10 @@ function validatePreferences(value) {
   if (typeof result.outputSuffix !== 'string' || !/^\.[a-zA-Z0-9_-]{1,32}$/.test(result.outputSuffix)) throw new Error('Output suffix must start with a dot and contain 1–32 letters, digits, hyphens or underscores.');
   if (!Number.isInteger(result.threads) || result.threads < 0 || result.threads > 16) throw new Error('Invalid encoder thread limit.');
   if (![1, 2, 3, 4].includes(result.inspectionConcurrency)) throw new Error('Invalid inspection concurrency.');
+  result.performanceMode = value.performanceMode ?? 'balanced';
+  if (!['balanced', 'adaptive'].includes(result.performanceMode)) throw new Error('Invalid performance mode.');
   if (!result.rememberOutput) result.outputDirectory = '';
-  return Object.fromEntries([...Object.keys(preferencesDefaults()), 'clearCompletedOnRestart', 'normalizeVolume', 'keepOriginal', 'allowedLanguages', 'keepDefaultTrack'].map(key => [key, result[key]]));
+  return Object.fromEntries([...Object.keys(preferencesDefaults()), 'performanceMode', 'clearCompletedOnRestart', 'normalizeVolume', 'keepOriginal', 'allowedLanguages', 'keepDefaultTrack'].map(key => [key, result[key]]));
 }
 const counters = () => ({ completed: 0, failed: 0, cancelled: 0, sourceBytes: 0, outputBytes: 0, processingSeconds: 0, mediaSeconds: 0, encoded: 0, extracted: 0, downmixed: 0, copied: 0 });
 const statsDefaults = () => ({ version: 1, since: new Date().toISOString(), totals: counters(), codecs: {}, downmixes: {}, profiles: {}, days: {}, recent: [] });
@@ -138,18 +140,27 @@ function validateQueue(value) {
   const ids = new Set();
   const result = value.items.map(item => {
     if (!item || typeof item.id !== 'string' || ids.has(item.id) || !path.isAbsolute(item.file || '') ||
-        !['Ready', 'Unchanged', 'Needs attention', 'Converting', 'Verifying', 'Complete', 'Error', 'Cancelled'].includes(item.status)) throw new Error('Invalid saved queue item.');
+        !['Ready', 'Unchanged', 'Needs attention', 'Converting', 'Verifying', 'Publishing', 'Complete', 'Error', 'Cancelled'].includes(item.status)) throw new Error('Invalid saved queue item.');
     ids.add(item.id);
     if (item.priority !== undefined && (!Number.isSafeInteger(item.priority) || item.priority < 0)) throw new Error('Invalid queue priority.');
     for (const key of ['output', 'temporaryOutput']) if (item[key] && !path.isAbsolute(item[key])) throw new Error('Invalid queue output path.');
     if (item.relativeDirectory && (path.isAbsolute(item.relativeDirectory) || item.relativeDirectory.split(/[\\/]/).includes('..'))) throw new Error('Invalid queue folder.');
     if (item.sidecars && (!Array.isArray(item.sidecars) || item.sidecars.some(s => !path.isAbsolute(s.file || '') || typeof s.suffix !== 'string' || /[\\/]/.test(s.suffix)))) throw new Error('Invalid queue subtitles.');
     const outputSnapshot = item.outputSnapshot === undefined ? undefined : validateIdentity(item.outputSnapshot);
+    const temporaryOutputSnapshot = item.temporaryOutputSnapshot === undefined ? undefined : validateIdentity(item.temporaryOutputSnapshot);
+    let timings;
+    if (item.conversionReport !== undefined && (typeof item.conversionReport !== 'string' || item.conversionReport.length > 1024 * 1024)) throw new Error('Invalid conversion report.');
+    if (item.timings !== undefined) {
+      const stages = ['conversion', 'structure', 'video', 'audio', 'subtitlesAndAttachments', 'publication', 'total'];
+      if (!item.timings || typeof item.timings !== 'object' || Array.isArray(item.timings) ||
+          Object.keys(item.timings).length !== stages.length || stages.some(stage => !Object.hasOwn(item.timings, stage) || !Number.isFinite(item.timings[stage]) || item.timings[stage] < 0)) throw new Error('Invalid queue timings.');
+      timings = Object.fromEntries(stages.map(stage => [stage, item.timings[stage]]));
+    }
     if (item.persistencePending !== undefined && typeof item.persistencePending !== 'boolean') throw new Error('Invalid queue persistence state.');
     for (const key of ['publicationPending', 'outputUnavailable']) if (item[key] !== undefined && typeof item[key] !== 'boolean') throw new Error('Invalid queue recovery state.');
     if (item.persistenceWarning !== undefined && typeof item.persistenceWarning !== 'string') throw new Error('Invalid persistence warning.');
     if (item.warnings !== undefined && (!Array.isArray(item.warnings) || item.warnings.some(w => typeof w !== 'string'))) throw new Error('Invalid queue warnings.');
-    return { id: item.id, file: item.file, status: item.status, publicationPending: !!item.publicationPending, outputUnavailable: !!item.outputUnavailable, persistenceWarning: item.persistenceWarning || '', ...(item.warnings !== undefined ? { warnings: item.warnings } : {}), ...(item.persistencePending !== undefined ? { persistencePending: item.persistencePending } : {}), ...(outputSnapshot ? { outputSnapshot } : {}), ...(item.priority !== undefined ? { priority: item.priority } : {}), output: item.output || '', temporaryOutput: item.temporaryOutput || '', relativeDirectory: item.relativeDirectory || '', sidecars: item.sidecars || [], importWarnings: (item.importWarnings || []).filter(w => typeof w === 'string'), error: typeof item.error === 'string' ? item.error : '' };
+    return { id: item.id, file: item.file, status: item.status, ...(item.conversionReport !== undefined ? { conversionReport: item.conversionReport } : {}), ...(timings ? { timings } : {}), publicationPending: !!item.publicationPending, outputUnavailable: !!item.outputUnavailable, persistenceWarning: item.persistenceWarning || '', ...(item.warnings !== undefined ? { warnings: item.warnings } : {}), ...(item.persistencePending !== undefined ? { persistencePending: item.persistencePending } : {}), ...(outputSnapshot ? { outputSnapshot } : {}), ...(temporaryOutputSnapshot ? { temporaryOutputSnapshot } : {}), ...(item.priority !== undefined ? { priority: item.priority } : {}), output: item.output || '', temporaryOutput: item.temporaryOutput || '', relativeDirectory: item.relativeDirectory || '', sidecars: item.sidecars || [], importWarnings: (item.importWarnings || []).filter(w => typeof w === 'string'), error: typeof item.error === 'string' ? item.error : '' };
   });
   return { version: 1, items: result };
 }
@@ -168,12 +179,18 @@ async function removeRecoveryTemp(file, items, io = fs) {
   // A temp-looking name is not ownership proof. Protect every recovered job's
   // inputs and published path, including paths referenced by a different job.
   const candidate = path.resolve(file);
+  // A recognizable name or an output directory is not ownership evidence.
+  // Only this profile's persisted temporary paths are eligible for recovery.
+  if (!items.some(item => item.temporaryOutput && path.resolve(item.temporaryOutput) === candidate)) return false;
   for (const item of items) {
     const protectedPaths = [item.file, item.output, ...(item.sidecars || []).map(sidecar => sidecar.file)];
     if (protectedPaths.some(protectedPath => protectedPath && path.resolve(protectedPath) === candidate)) return false;
   }
+  const owner = items.find(item => item.temporaryOutput && path.resolve(item.temporaryOutput) === candidate);
+  if (!owner?.temporaryOutputSnapshot) return false;
   const current = await io.lstat(file);
   if (!current.isFile() || current.isSymbolicLink()) return false;
+  if (!sameSource(owner.temporaryOutputSnapshot, current)) return false;
   const linked = [];
   for (const item of items) {
     if (!item.output) continue;
@@ -206,7 +223,7 @@ async function removeRecoveryTemp(file, items, io = fs) {
 async function cleanupInterrupted(items) {
   const warnings = [];
   for (const item of items) {
-    if (!['Converting', 'Verifying'].includes(item.status) || !item.temporaryOutput) continue;
+    if (!['Converting', 'Verifying', 'Publishing'].includes(item.status) || !item.temporaryOutput) continue;
     const temp = item.temporaryOutput;
     // Delete only the exact recorded application partial, never a directory or symlink.
     if (!/^\..+\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.partial\.mkv$/i.test(path.basename(temp)) || temp === item.file || temp === item.output) continue;
@@ -215,8 +232,8 @@ async function cleanupInterrupted(items) {
   }
   return warnings;
 }
-// Scan known output roots once at startup, including preserved season folders.
-// Only our hidden UUID-named partials qualify; never follow directory/file symlinks.
+// Scan explicitly supplied output roots once at startup. Only queue-recorded
+// UUID partials qualify; unrecorded leftovers must be retained, not guessed at.
 // Returns a deletion count; missing, disconnected or locked paths are harmless.
 async function cleanupOrphanedTempFiles(outputDirectories, { io = fs, items = [] } = {}) {
   const roots = Array.isArray(outputDirectories) ? outputDirectories : [outputDirectories];

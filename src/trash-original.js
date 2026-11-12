@@ -12,6 +12,9 @@ const { hashFile } = require('./engine');
 async function trashOriginal(item, result, { enabled, signal, trashItem }) {
   if (!enabled) return [];
   if (signal?.aborted) return ['Original retained: queue was canceled before moving it to Trash.'];
+  if (item.plan?.blocked || item.plan?.unresolved || item.plan?.tracks?.some(track => track.blocked || ['unresolved', 'playback-unconfirmed'].includes(track.compatibility))) return ['Original retained: playback compatibility is blocked, unresolved or unconfirmed.'];
+  if (item.plan?.droppedStreams?.length) return ['Original retained: language filtering removed source streams. Review the output before removing the source yourself.'];
+  if (item.persistencePending || item.publicationPending || item.outputUnavailable) return ['Original retained: output publication or recovery persistence is incomplete.'];
   if ((result.sidecars || []).length < (item.sidecars || []).length) return ['Original retained: not all external subtitles were copied successfully.'];
   try {
     const source = await fs.lstat(item.file);
@@ -34,21 +37,8 @@ async function trashOriginal(item, result, { enabled, signal, trashItem }) {
     if (!await validOutput(result.output, result.outputSnapshot)) throw new Error('Verified media output changed before Trash cleanup.');
     if (signal?.aborted) return ['Original retained: queue was canceled before moving it to Trash.'];
     await trashItem(path.resolve(item.file));
-    const warnings = [];
-    for (const sidecar of item.sidecars || []) {
-      if (signal?.aborted) {
-        warnings.push('Remaining subtitle sources retained: queue was canceled during Trash cleanup.');
-        break;
-      }
-      try {
-        // The main Trash operation may have taken time: check each source again.
-        await checkSubtitle(sidecar);
-        if (signal?.aborted) { warnings.push('Remaining subtitle sources retained: queue was canceled during Trash cleanup.'); break; }
-        await trashItem(path.resolve(sidecar.file));
-      }
-      catch (error) { warnings.push(`Could not move subtitle source to Trash: ${path.basename(sidecar.file)} — ${error.message}`); }
-    }
-    return warnings;
+    // External subtitle sources may be shared with other media. Never trash them.
+    return [];
   } catch (error) {
     return [`Could not move original to Trash: ${error.message}`];
   }

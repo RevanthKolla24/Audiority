@@ -8,6 +8,7 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron');
 // and disables nodeIntegration. The bridge grants specific operations, not filesystem access.
 // invoke sends a request to ipcMain and returns a Promise; on listens for pushed updates.
 contextBridge.exposeInMainWorld('audiority', {
+  platform: process.platform,
   getSetup: () => ipcRenderer.invoke('get-setup'),
   previewProfile: value => ipcRenderer.invoke('preview-profile', value),
   profileOperation: action => ipcRenderer.invoke('profile-operation', action),
@@ -16,6 +17,9 @@ contextBridge.exposeInMainWorld('audiority', {
   cancelImport: () => ipcRenderer.invoke('cancel-import'),
   getAppearance: () => ipcRenderer.invoke('get-appearance'),
   getAppSettings: () => ipcRenderer.invoke('get-app-settings'),
+  getUpdateState: () => ipcRenderer.invoke('get-update-state'),
+  checkUpdates: () => ipcRenderer.invoke('check-updates'),
+  installUpdate: () => ipcRenderer.invoke('install-update'),
   saveAppSettings: value => ipcRenderer.invoke('save-app-settings', value),
   getStatistics: () => ipcRenderer.invoke('get-statistics'),
   statisticsOperation: action => ipcRenderer.invoke('statistics-operation', action),

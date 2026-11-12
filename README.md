@@ -2,25 +2,27 @@
   <img src="src/assets/logo.png" alt="Audiority logo" width="128">
 </p>
 <h1 align="center">Audiority</h1>
-<p align="center"><strong>Local, channel-safe MKV audio conversion for home theaters.</strong><br>Prepare your audio for your receiver. Keep your video and anime typesetting intact.</p>
-<p align="center">macOS Apple Silicon · Windows x64 · Version 1.0.0 · MIT application license</p>
+<p align="center"><strong>Taking back the authority that your media has on your setup.</p>
+<p align="center">macOS Apple Silicon · Windows x64 · Version 1.0.4 · MIT application license</p>
 
 ---
 
-Audiority turns playback compatibility into a reviewable plan. Pick your receiver and playback path, import media, and prepare compatible audio locally—with no uploads or server credentials.
+Audiority changes the audio codec of every audio track in your media file, allowing for maximum compatibilty to your AVR and making sure surround sound works properly depending on your setup. As a bonus, we make sure that the codec we choose for your AVR is the most "loseless" for you AVR. This allows for the least amount of data lost while the codec being compatible with your AVR without any errors! 
 
-Video is copied without re-encoding. Outputs are new MKV files; sources stay in place unless you explicitly enable Auto-Trash.
+Ex. FLAC 5.1 --> Bose AVR (X) (2.0 stereo only) | FLAC 5.1 --> Audiority --> DTS 5.1 --> Bose AVR (✓) (5.1 Surround, most bits preserved)
+
+Audiority copies the video file which means the program never actually takes the current file and re-encodes it. This is because if it encodes the original file, the original file has a small chance of corrupting and to reduce error, we take a copy of the file and then encode it. The source file stays in the same place unless you enable "Auto-Trash" and the new output file is in a .mkv container. 
 
 ## ✨ Key features
 
-- 🎧 **Smart DTS / Dolby Digital conversion** — profile-aware decisions, compatible DTS-core extraction and PCM stereo output.
-- 📺 **Plex / Jellyfin playback profiles** — save named receiver, player and connection setups with custom rules.
-- 🎨 **Dynamic themes** — 12 presets, custom palettes and theme-matched runtime window/Dock icons.
-- 📂 **Whole-show imports and watch folders** — recursive season discovery, deduplication and optional background MKV imports.
-- 🈶 **Anime-friendly preservation** — preserve and verify ASS/SSA subtitles and embedded fonts; copy matching subtitle sidecars.
-- 🛟 **Recoverable queues** — restore pending jobs after restart, prioritize files and pause between conversions.
-- 🔊 **Compatibility tracks** — optionally retain original audio alongside a converted track, with approved downmixing and normalization.
-- 📊 **Private statistics** — processed GB, track operations and recent activity, stored locally without telemetry.
+- **Efficient DTS / Dolby Digital conversion** — profile-aware decisions, compatible DTS-core extraction and PCM stereo output.
+- **Custom playback profiles** — save named receiver, player and connection setups with custom rules.
+- **Custom themes** — 12 presets, custom palettes and theme-matched runtime window/Dock icons.
+- **Whole-show imports and watch folders** — recursive season discovery, deduplication and optional background MKV imports.
+- **Anime-friendly preservation** — preserve and verify ASS/SSA subtitles and embedded fonts; copy matching subtitle sidecars.
+- **Recoverable queues** — restore pending jobs after restart, prioritize files and pause between conversions.
+- **Compatibility tracks** — optionally retain original audio alongside a converted track, with approved downmixing and normalization.
+- **Private statistics** — processed GB, track operations and recent activity, stored locally without telemetry.
 
 > **Compatibility, not magic:** DTS/AC-3 encoding is lossy. Audiority does not guarantee Plex/Jellyfin direct play or fix unsupported video decoding. Channels are preserved unless you approve a downmix.
 

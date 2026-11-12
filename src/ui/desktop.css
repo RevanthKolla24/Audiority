@@ -1,4 +1,8 @@
 /* Keep long release names from pushing status and action controls off-screen. */
+.progress-wrap{flex-wrap:wrap}.progress-wrap .progress-text{flex:1 1 300px;min-width:0;overflow-wrap:anywhere}.progress-wrap progress{flex-basis:160px}
+/* Filesystem paths and tool errors may contain no spaces. Keep them inside the workspace. */
+#message,#settings-output,#settings-watch-folder,.item .error,.item .warning-text,.item .meta,.item .track{overflow-wrap:anywhere;min-width:0}
+@media(max-width:600px){.progress-wrap .progress-text{flex:none}.progress-wrap progress{flex-basis:auto}}
 .item-head > div:first-child{min-width:0;flex:1}
 .item-head .name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;overflow-wrap:normal}
 .item-head .status{flex-shrink:0}

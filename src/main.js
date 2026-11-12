@@ -3,7 +3,7 @@
  * Coordinates Electron in the invisible background process. Talks to the web UI through preload.js. Guide: queue persistence; imports; startup recovery; secure window; IPC handlers; conversion runner; shutdown.
  * Learning note: async functions return Promises; await gets their result and try/catch handles failure.
  */
-const { app, BrowserWindow, ipcMain, dialog, shell, powerSaveBlocker, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, powerSaveBlocker, nativeImage, Menu } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const { startUpdates } = require('./updates');
 let stopUpdates = () => {};
@@ -17,6 +17,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { pathToFileURL } = require('node:url');
 const { Engine } = require('./engine');
+const { audioOutputPreview } = require('./audio-output-map');
 const { nextQueueItem } = require('./queue-priority');
 const { trashOriginal } = require('./trash-original');
 const { validOutput, outputState } = require('./source-safety');
@@ -71,7 +72,7 @@ const page = path.join(__dirname, 'ui', 'index.html');
 let queueWrites = Promise.resolve();
 // Snapshots recovery fields and returns a serialized write Promise so older saves cannot overtake newer state.
 function persistQueue(required = false) {
-  const snapshot = new Map([...items].map(([id, item]) => [id, structuredClone(Object.fromEntries(['id', 'file', 'status', 'output', 'outputSnapshot', 'publicationPending', 'outputUnavailable', 'persistenceWarning', 'temporaryOutput', 'relativeDirectory', 'sidecars', 'importWarnings', 'warnings', 'persistencePending', 'error', 'priority'].map(key => [key, item[key]])))]));
+  const snapshot = new Map([...items].map(([id, item]) => [id, structuredClone(Object.fromEntries(['id', 'file', 'status', 'output', 'outputSnapshot', 'publicationPending', 'outputUnavailable', 'persistenceWarning', 'temporaryOutput', 'temporaryOutputSnapshot', 'relativeDirectory', 'sidecars', 'importWarnings', 'warnings', 'persistencePending', 'error', 'priority', 'timings', 'conversionReport'].map(key => [key, item[key]])))]));
   const write = queueWrites.then(() => saveQueue(app.getPath('userData'), snapshot));
   queueWrites = write.catch(error => send('queue-warning', { message: `Queue could not be saved: ${error.message}` }));
   return required ? write : queueWrites;
@@ -131,8 +132,9 @@ async function addFiles(paths) {
 }
 // Publish item: receives item, id = item.id. See the return statements below for the result; async results are Promises.
 function publishItem(item, id = item.id) {
-    item.status = item.outputUnavailable ? 'Needs attention' : item.output ? 'Complete' : ['Error', 'Cancelled'].includes(item.status) ? item.status : item.plan.needsConversion ? 'Ready' : item.plan.unresolved ? 'Needs attention' : 'Unchanged';
-    send('item', { item: { id, outputUnavailable: !!item.outputUnavailable, persistenceWarning: item.persistenceWarning || '', persistencePending: !!item.persistencePending, needsConversion: item.plan.needsConversion, droppedStreams: item.plan.droppedStreams, priority: item.priority, name: item.name, relativeDirectory: item.relativeDirectory, subtitleInfo: item.subtitleInfo, sidecarCount: item.sidecars?.length || 0, size: item.size, duration: item.duration, tracks: item.plan.tracks, warnings: [...new Set([...item.plan.warnings, ...(item.importWarnings || []), ...(item.warnings || [])])], status: item.status, error: item.error || '', output: item.output || '' } });
+    item.outputPreview = item.output ? null : audioOutputPreview(item);
+    item.status = item.outputUnavailable ? 'Needs attention' : item.output ? 'Complete' : item.plan.blocked ? 'Needs attention' : ['Error', 'Cancelled'].includes(item.status) ? item.status : item.plan.needsConversion ? 'Ready' : item.plan.unresolved ? 'Needs attention' : 'Unchanged';
+    send('item', { item: { id, outputUnavailable: !!item.outputUnavailable, persistenceWarning: item.persistenceWarning || '', persistencePending: !!item.persistencePending, needsConversion: item.plan.needsConversion, droppedStreams: item.plan.droppedStreams, priority: item.priority, name: item.name, timings: item.timings, conversionReport: item.conversionReport, relativeDirectory: item.relativeDirectory, subtitleInfo: item.subtitleInfo, sidecarCount: item.sidecars?.length || 0, size: item.size, duration: item.duration, tracks: item.plan.tracks, outputPreview: item.outputPreview, warnings: [...new Set([...item.plan.warnings, ...(item.importWarnings || []), ...(item.warnings || [])])], status: item.status, error: item.error || '', output: item.output || '' } });
 }
 
 app.whenReady().then(async () => {
@@ -185,7 +187,7 @@ app.whenReady().then(async () => {
         item.status = item.plan.needsConversion ? 'Ready' : item.plan.unresolved ? 'Needs attention' : 'Unchanged';
         item.error = '';
       }
-      if (['Converting', 'Verifying', 'Complete'].includes(item.status) && !item.output) { item.status = 'Ready'; item.error = ''; }
+      if (['Converting', 'Verifying', 'Publishing', 'Complete'].includes(item.status) && !item.output) { item.status = item.plan.blocked ? 'Needs attention' : 'Ready'; item.error = ''; }
       items.set(item.id, item);
       publishItem(item);
     } catch (error) {
@@ -197,6 +199,9 @@ app.whenReady().then(async () => {
   if (!recovered.warning) await persistQueue();
   // Isolation keeps preload privileges separate; sandbox and no Node integration restrict UI code.
   window = new BrowserWindow({ icon: appIcon, width: 1240, height: 850, minWidth: 960, minHeight: 680, backgroundColor: '#f5f5f3', title: 'Audiority', webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
+  if (process.platform === 'win32') {
+    Menu.setApplicationMenu(Menu.buildFromTemplate(require('./windows-menu').windowsMenu(command => send('desktop-command', { command }))));
+  }
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
@@ -239,16 +244,27 @@ app.whenReady().then(async () => {
     return true;
   });
   handle('get-app-settings', () => ({ preferences, warning: preferencesWarning, outputDirectory, version: app.getVersion() }));
+  handle('get-update-state', () => stopUpdates.getState?.() || { status: 'idle' });
+  handle('check-updates', () => stopUpdates.check?.());
+  handle('install-update', () => stopUpdates.install?.());
   handle('save-app-settings', async value => {
     if (running || importing || profileBusy || appStateBusy) throw new Error('Wait for the current operation to finish before saving settings.');
     appStateBusy = true;
     try {
       const next = validatePreferences({ ...value, outputDirectory });
+      if (next.trashOriginals && !preferences.trashOriginals) {
+        const confirmation = await dialog.showMessageBox(window, { type: 'warning', title: 'Enable Auto-Trash?',
+          message: 'The source may contain higher-quality audio than the converted output.',
+          detail: 'Verification checks preserved media content, not listening quality or player selection. Lossy replacement can discard your only lossless audio copy. External subtitle sources stay untouched. Sources with unresolved compatibility, removed streams or incomplete recovery saves are retained. Auto-Trash applies to future successful jobs while enabled.',
+          buttons: ['Keep Auto-Trash off', 'Enable Auto-Trash'], defaultId: 0, cancelId: 0 });
+        if (confirmation.response !== 1) throw new Error('Auto-Trash was not enabled. Settings were not saved.');
+        if (queueQuitPending) throw new Error('Application shutdown is in progress.');
+      }
       if (next.watchFolder !== preferences.watchFolder || next.watchEnabled !== preferences.watchEnabled || next.outputSuffix !== preferences.outputSuffix) watcher.reset();
       preferences = await saveState(app.getPath('userData'), 'app-settings.json', next, validatePreferences);
       preferencesWarning = '';
       engine.setPreferences(preferences);
-      for (const item of items.values()) if (item.probe) { engine.replan(item); publishItem(item); }
+      for (const item of items.values()) if (item.probe && !item.output) { engine.replan(item); publishItem(item); }
       await persistQueue();
       if (!preferences.storeFilenames) {
         stats.recent.forEach(job => { delete job.filename; });
@@ -340,7 +356,17 @@ app.whenReady().then(async () => {
     }
     return outputDirectory;
   });
-  handle('clear', () => { if (running || importing || appStateBusy || profileBusy) throw new Error('Queue is busy.'); items.clear(); return persistQueue(true); });
+  handle('clear', async () => {
+    if (running || importing || appStateBusy || profileBusy) throw new Error('Queue is busy.');
+    appStateBusy = true;
+    send('recovery-busy', { value: true });
+    const previous = new Map(items);
+    try {
+      items.clear();
+      try { await persistQueue(true); }
+      catch (error) { for (const [id, item] of previous) items.set(id, item); throw error; }
+    } finally { appStateBusy = false; send('recovery-busy', { value: false }); }
+  });
   handle('cancel', cancelQueue);
   handle('pause', () => {
     if (!running || controller?.signal.aborted) return false;
@@ -418,6 +444,22 @@ app.whenReady().then(async () => {
     }
     if (!settings) throw new Error('Finish playback setup first.');
     if (!outputDirectory) throw new Error('Choose an output folder first.');
+    const eligible = [...items.values()].filter(item => !item.output && item.plan?.needsConversion && !item.plan.blocked && ['Ready', 'Error', 'Cancelled'].includes(item.status));
+    if (!eligible.length) throw new Error('No runnable jobs. Review blocked or unresolved track plans before starting.');
+    const preflightSnapshot = JSON.stringify([settings, preferences, outputDirectory, eligible.map(item => [item.id, item.plan])]);
+    const unresolved = eligible.filter(item => item.plan.unresolved);
+    if (unresolved.length) {
+      const confirmation = await dialog.showMessageBox(window, { type: 'warning', title: 'Some audio will remain unresolved',
+        message: `${unresolved.length} job(s) will NOT resolve all audio compatibility problems.`,
+        detail: `${unresolved.slice(0, 5).map(item => `${item.name}\n${item.plan.tracks.filter(track => track.compatibility === 'unresolved').map(track => `Track ${track.index}: ${track.reason}`).join('\n')}`).join('\n\n')}\n\nOnly the other planned changes will run. Review the conversion plan before continuing.`,
+        buttons: ['Review plan', 'Proceed with partial conversion'], defaultId: 0, cancelId: 0 });
+      if (confirmation.response !== 1) return;
+      if (running || importing || profileBusy || appStateBusy || queueQuitPending) throw new Error('Queue changed while reviewing. Try again.');
+      // Reconfirm if an asynchronous settings/import operation changed the plan.
+      if (eligible.some(item => items.get(item.id) !== item || item.plan.blocked)) throw new Error('Queue plan changed. Review it before starting again.');
+      const currentEligible = [...items.values()].filter(item => !item.output && item.plan?.needsConversion && !item.plan.blocked && ['Ready', 'Error', 'Cancelled'].includes(item.status));
+      if (JSON.stringify([settings, preferences, outputDirectory, currentEligible.map(item => [item.id, item.plan])]) !== preflightSnapshot) throw new Error('Queue or settings changed while reviewing. Review the new plan before starting.');
+    }
     running = true;
     resumeQueue();
     controller = new AbortController();
@@ -442,19 +484,22 @@ app.whenReady().then(async () => {
         // After waking, rescan: priorities may have changed while we were waiting.
         if (isQueuePaused) { await queuePausePromise; continue; }
         attempted.add(item.id);
-        send('status', { id: item.id, status: 'Converting', progress: 0, error: '' });
+        send('status', { id: item.id, status: 'Converting', progress: 0, error: '', verificationStage: '', diagnostic: '' });
         const started = performance.now(); let lastProgressAt = 0;
         try {
           const result = await engine.convert(item, outputDirectory, { signal: controller.signal, preferences,
-            onVerification: verificationStage => send('status', { id: item.id, status: 'Verifying', progress: 0.99, verificationStage }),
+            onStage: (status, verificationStage) => send('status', { id: item.id, status, progress: status === 'Converting' ? 0 : 0.99, verificationStage }),
+            onVerification: (verificationStage, verification) => send('status', { id: item.id, status: 'Verifying', progress: 0.99, verificationStage, verification }),
             onPublished: async publication => {
               Object.assign(item, publication, { publicationPending: true });
               // Record media publication before any external subtitle work begins.
               await persistQueue(true);
             },
-            onTemporaryOutput: async temp => { item.temporaryOutput = temp; await persistQueue(true); }, onProgress: progress => { if (progress < 0.99 && Date.now() - lastProgressAt < 150) return; lastProgressAt = Date.now(); send('status', { id: item.id, status: progress >= 0.99 && progress < 1 ? 'Verifying' : 'Converting', progress }); } });
+            onTemporaryOutput: async (temp, snapshot) => { item.temporaryOutput = temp; item.temporaryOutputSnapshot = snapshot; await persistQueue(true); }, onProgress: progress => { if (progress >= 1) return; if (Date.now() - lastProgressAt < 150) return; lastProgressAt = Date.now(); send('status', { id: item.id, status: item.status, progress }); } });
           item.output = result.output;
           item.outputSnapshot = result.outputSnapshot;
+          item.timings = result.timings;
+          item.conversionReport = result.conversionReport;
           item.publicationPending = false;
           // Persist the verified output before an optional source move, so a crash during
           // Trash cannot make recovery lose the successfully published destination.
@@ -468,7 +513,7 @@ app.whenReady().then(async () => {
             enabled: preferences.trashOriginals, signal: controller.signal,
             trashItem: file => shell.trashItem(file)
           }));
-          send('status', { id: item.id, status: 'Complete', progress: 1, output: result.output, persistenceWarning: item.persistenceWarning || '', persistencePending: !!item.persistencePending, warnings: result.warnings });
+          send('status', { id: item.id, status: 'Complete', progress: 1, output: result.output, timings: result.timings, conversionReport: result.conversionReport, persistenceWarning: item.persistenceWarning || '', persistencePending: !!item.persistencePending, warnings: result.warnings });
           await record('completed', item, started, result.outputBytes);
         } catch (error) {
           if (item.output) {
@@ -476,7 +521,11 @@ app.whenReady().then(async () => {
             item.persistenceWarning = `Media published, but finalization stopped: ${error.message}. Original retained. Retry queue save; external subtitles may be incomplete.`;
             send('status', { id: item.id, status: 'Complete', output: item.output, persistencePending: true, persistenceWarning: item.persistenceWarning, warnings: item.warnings || [] });
             await record('completed', item, started, item.outputSnapshot?.size || 0);
-          } else { send('status', { id: item.id, status: controller.signal.aborted ? 'Cancelled' : 'Error', error: error.message }); await record(controller.signal.aborted ? 'cancelled' : 'failed', item, started); }
+          } else {
+            const diagnostic = `Audiority ${app.getVersion()} · ${process.platform}/${process.arch}\nStage: ${item.status} · ${item.verificationStage || 'Writing output'}\n${error.message}\nPlan: ${item.plan.tracks.map(track => `${track.index}: ${track.sourceFormat || track.sourceCodec} → ${track.action} ${track.codec}`).join('; ')}`;
+            send('status', { id: item.id, status: controller.signal.aborted ? 'Cancelled' : 'Error', error: error.message, diagnostic });
+            await record(controller.signal.aborted ? 'cancelled' : 'failed', item, started);
+          }
         }
       }
     } finally {
@@ -492,6 +541,12 @@ app.whenReady().then(async () => {
   });
   window.loadFile(page);
   stopUpdates = startUpdates({ app, updater: autoUpdater, dialog, shell,
+    onState: state => send('app-update', { state }),
+    rollbackInstall: () => {
+      queueQuitPending = false; queueQuitReady = false;
+      watchStopping = false; clearInterval(watchTimer);
+      watchTimer = setInterval(() => { void pollWatchFolder(); }, 30000);
+    },
     isBusy: () => running || importing || watchBusy || profileBusy || appStateBusy || appearanceBusy || queueQuitPending,
     prepareInstall: async () => {
       if (running || importing || watchBusy || profileBusy || appStateBusy || appearanceBusy || queueQuitPending) return false;
@@ -504,7 +559,6 @@ app.whenReady().then(async () => {
         throw error;
       }
       queueQuitReady = true;
-      stopUpdates();
       return true;
     }
   });

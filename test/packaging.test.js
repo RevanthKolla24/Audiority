@@ -23,9 +23,10 @@ test('installer targets use explicit agreements and bundle prepared tools', asyn
   assert.equal(build.nsis.uninstallerIcon, build.win.icon);
   const ico = fs.readFileSync(path.join(root, build.win.icon));
   assert.equal(ico.readUInt16LE(2), 1);
-  assert.equal(ico.readUInt16LE(4), 1);
-  assert.equal(ico.readUInt32LE(14), ico.length - 22);
-  assert.equal(ico.subarray(22, 30).toString('hex'), '89504e470d0a1a0a');
+  assert.equal(ico.readUInt16LE(4), 9);
+  const firstImage = ico.readUInt32LE(18);
+  assert.equal(firstImage, 6 + 9 * 16);
+  assert.equal(ico.subarray(firstImage, firstImage + 8).toString('hex'), '89504e470d0a1a0a');
   assert.ok(fs.readFileSync(path.join(root, build.dmg.license), 'utf8').includes('MIT License'));
   assert.ok(build.mac.extraResources.some(r => r.from === 'legal-tools' && r.to === 'tools'));
   assert.ok(build.win.extraResources.some(r => r.from === 'legal-tools-win' && r.to === 'tools'));
@@ -49,4 +50,16 @@ test('release validation rejects missing notices and wrong-platform tools withou
     assert.throws(() => validateTools('linux', directory), /Unsupported target/);
     assert.ok(!fs.existsSync(path.join(directory, 'tools')));
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('release builds have read-only tokens and every external action uses an immutable revision', () => {
+  const workflow = fs.readFileSync(path.join(root, '.github/workflows/release.yml'), 'utf8');
+  assert.match(workflow, /\npermissions:\n  contents: read\n/);
+  assert.equal((workflow.match(/contents: write/g) || []).length, 1);
+  assert.match(workflow, /  publish:[\s\S]*?    permissions:\n      contents: write/);
+  const actions = [...workflow.matchAll(/uses: ([^\s#]+)/g)].map(match => match[1]);
+  assert.ok(actions.length >= 5);
+  for (const action of actions) assert.match(action, /^[\w.-]+\/[\w.-]+@[a-f0-9]{40}$/);
+  assert.equal((workflow.match(/persist-credentials: false/g) || []).length,
+    actions.filter(action => action.startsWith('actions/checkout@')).length);
 });

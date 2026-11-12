@@ -10,12 +10,18 @@ const { createReadStream } = require('node:fs');
 const { pipeline } = require('node:stream/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { performance } = require('node:perf_hooks');
 const { planFile } = require('./policy');
 const { sourceFormat } = require('./profiles');
 const os = require('node:os');
 const { resolveOutputDirectory } = require('./imports');
 const { validatePreferences, preferencesDefaults } = require('./app-state');
 const { sourceIdentity, sameSource } = require('./source-safety');
+const { estimatedAudioBytes } = require('./conversion-estimates');
+const { createResourceBudget } = require('./resource-budget');
+const { verificationWorkers } = require('./verification-workers');
+const { audioFingerprints } = require('./audio-fingerprints');
+const { audioOutputMap, compatibilityTitle } = require('./audio-output-map');
 // A title is a hint only for retained embedded subtitles, never audio or fonts.
 function needsForcedSubtitleFlag(stream) {
   return stream.codec_type === 'subtitle' && /\bforced\b/i.test(stream.tags?.title || '') && stream.disposition?.forced !== 1;
@@ -104,50 +110,87 @@ async function hashFile(file, signal) {
 // Accepts probe executable/arguments/signal; returns a hash of its output without storing a huge JSON string.
 async function hashProbe(binary, args, signal, onActivity = () => {}) {
   const hash = crypto.createHash('sha256');
-  let packets = 0, lastReport = 0;
+  // Include scan offsets solely for progress. Never fingerprint container offsets:
+  // remuxing necessarily changes them while retaining identical payloads.
+  args = args.map(arg => typeof arg === 'string' ? arg.replace(/packet=/g, 'packet=pos,') : arg);
+  // Progress is optional; the probe remains responsible for reporting read errors.
+  const size = await fs.stat(args[args.length - 1]).then(stat => stat.size, () => 0);
+  let packets = 0, lastReport = 0, position = 0;
   await run(binary, args, { signal, idleTimeoutMs: 120000, onLine: line => {
-    hash.update(`${line}\n`);
+    const offset = line.match(/^\s*"pos":/);
+    if (offset) {
+      const value = line.match(/:\s*"?(\d+)/);
+      if (value) position = Math.max(position, Number(value[1]));
+    }
+    else hash.update(`${line}\n`);
     if (line.includes('"data_hash"')) packets++;
-    if (Date.now() - lastReport >= 1000) { lastReport = Date.now(); onActivity(packets); }
+    if (Date.now() - lastReport >= 1000) { lastReport = Date.now(); onActivity(packets, { fraction: size ? position / size : 0 }); }
   } });
+  onActivity(packets, { fraction: 1, done: true });
   return hash.digest('hex');
 }
 
 // Accepts an executable and argument array; returns a Promise for output or rejects on tool failure/cancellation.
-function run(binary, args, { signal, onLine, idleTimeoutMs = 0 } = {}) {
+function run(binary, args, { signal, onLine, idleTimeoutMs = 0, maxOutputBytes = 32 * 1024 * 1024, maxLineBytes = 1024 * 1024 } = {}) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(new Error('Cancelled'));
+    if (![maxOutputBytes, maxLineBytes].every(value => Number.isSafeInteger(value) && value > 0)) return reject(new Error('Invalid tool output limit.'));
     // spawn starts a separate OS process. An argument array avoids shell parsing of filenames.
     // Pipes let us read progress/errors; ignored stdin prevents the tool waiting for keyboard input.
     const child = spawn(binary, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '', stderr = '', pending = '';
-    let idleTimer, timedOut = false;
+    // Incremental UTF-8 decoding preserves metadata characters split across chunks.
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    let idleTimer, killTimer, timedOut = false, closed = false, callbackError, outputBytes = 0;
+    const terminate = () => {
+      if (closed) return;
+      child.kill();
+      // A malformed tool/input must not hang cleanup by ignoring SIGTERM.
+      if (!killTimer) killTimer = setTimeout(() => { child.kill('SIGKILL'); }, 1000);
+    };
+    const fail = error => { callbackError ||= error; terminate(); };
+    const deliver = line => {
+      if (callbackError) return;
+      if (Buffer.byteLength(line) > maxLineBytes) { fail(new Error(`Tool output line exceeded ${maxLineBytes} bytes.`)); return; }
+      try { onLine(line); }
+      catch (error) { fail(error); }
+    };
     const activity = () => {
       if (!idleTimeoutMs) return;
       clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => { timedOut = true; child.kill(); }, idleTimeoutMs);
+      idleTimer = setTimeout(() => { timedOut = true; terminate(); }, idleTimeoutMs);
     };
     activity();
-    const abort = () => { child.kill(); };
+    const abort = terminate;
     signal?.addEventListener('abort', abort, { once: true });
     child.stdout.on('data', chunk => {
       activity();
-      if (!onLine) stdout += chunk.toString();
+      if (callbackError || timedOut || signal?.aborted) return;
+      if (!onLine) {
+        outputBytes += Buffer.byteLength(chunk);
+        if (outputBytes > maxOutputBytes) { fail(new Error(`Tool output exceeded ${maxOutputBytes} bytes.`)); return; }
+        stdout += chunk;
+      }
       else {
-        pending += chunk.toString();
+        pending += chunk;
         const lines = pending.split(/\r?\n/); pending = lines.pop();
-        for (const line of lines) onLine(line);
+        for (const line of lines) deliver(line);
+        if (Buffer.byteLength(pending) > maxLineBytes) { pending = ''; fail(new Error(`Tool output line exceeded ${maxLineBytes} bytes.`)); }
       }
     });
-    child.stderr.on('data', chunk => { activity(); stderr = (stderr + chunk.toString()).slice(-24000); });
-    child.on('error', error => { clearTimeout(idleTimer); signal?.removeEventListener('abort', abort); reject(error); });
+    child.stderr.on('data', chunk => { activity(); stderr = (stderr + chunk).slice(-24000); });
+    child.on('error', error => { clearTimeout(idleTimer); clearTimeout(killTimer); signal?.removeEventListener('abort', abort); reject(error); });
     child.on('close', code => {
+      closed = true;
       clearTimeout(idleTimer);
+      clearTimeout(killTimer);
       signal?.removeEventListener('abort', abort);
       if (signal?.aborted) reject(new Error('Cancelled'));
+      else if (callbackError) reject(callbackError);
       else if (timedOut) reject(new Error(`Verification stalled: no tool activity for ${idleTimeoutMs / 1000} seconds. Check that the media drive is connected and readable.${stderr.trim() ? ` ${stderr.trim()}` : ''}`));
-      else if (code !== 0) reject(new Error(stderr.trim() || `Process exited with ${code}`));
-       else { if (onLine && pending) onLine(pending); resolve({ stdout, stderr }); }
+      else if (code !== 0) reject(new Error(`Tool ${path.basename(binary)} exited with ${code}. ${stderr.trim() || 'No diagnostic output.'}`));
+       else { if (onLine && pending) deliver(pending); if (callbackError) reject(callbackError); else resolve({ stdout, stderr }); }
     });
   });
 }
@@ -167,19 +210,28 @@ class Engine {
   setPreferences(preferences) { this.keepOriginal = !!preferences.keepOriginal; this.preferences = preferences; }
   // Profile language lists override global ones; an empty profile list inherits Settings.
   languageProfile() {
-    const options = this.profile?.allowedLanguages?.length ? this.profile : this.preferences || {};
+    if (this.profile?.languageMode === 'all') return { ...this.profile, allowedLanguages: [] };
+    const options = this.profile?.languageMode === 'custom' || this.profile?.allowedLanguages?.length ? this.profile : this.preferences || {};
     return { ...this.profile, allowedLanguages: options.allowedLanguages || [], keepDefaultTrack: options.keepDefaultTrack ?? true };
   }
   plan(probe) {
     // Apply language selection independently of codec planning, including when no profile exists.
     const dropped = require('./policy').languageDrops(probe, this.languageProfile());
-    const plan = planFile({ ...probe, streams: probe.streams.filter(s => !dropped.includes(s.index)) }, this.capabilities, this.profile);
+    // Streams have already been filtered using the effective policy. Do not
+    // apply a stale profile language list again inside codec planning.
+    const codecProfile = this.profile ? { ...this.profile, allowedLanguages: [] } : null;
+    const plan = planFile({ ...probe, streams: probe.streams.filter(s => !dropped.includes(s.index)) }, this.capabilities, codecProfile);
     return { ...plan, droppedStreams: dropped, streamsToDrop: dropped.map(index => `0:${index}`), needsConversion: plan.needsConversion || dropped.length > 0, warnings: [...plan.warnings, ...(dropped.length ? [`Language filter removes ${dropped.length} embedded audio/subtitle stream(s).`] : [])] };
   }
   // Accepts resolved playback constraints; stores them for subsequent jobs.
   setProfile(profile) { this.profile = profile; }
   // Accepts an inspected job; refreshes its plan and returns the job, without converting media.
-  replan(item) { item.plan = this.plan(item.probe); if (this.keepOriginal) for (const track of item.plan.tracks) if (track.action !== 'copy') track.keepOriginal = true; return item; }
+  retainOriginal(track) {
+    if (this.profile?.retentionMode === 'replace') return false;
+    if (this.profile?.retentionMode === 'keep') return true;
+    return !!(track.keepOriginal || this.keepOriginal);
+  }
+  replan(item) { item.plan = this.plan(item.probe); for (const track of item.plan.tracks) if (track.action !== 'copy') track.keepOriginal = this.retainOriginal(track); return item; }
   // Inspects actual tool support; resolves when cached encoder capabilities are ready.
   async initialize() {
     const entries = await Promise.all(['dca', 'ac3'].map(async encoder => {
@@ -221,6 +273,7 @@ class Engine {
   }
   // Inspect: receives file, { signal } = {}. See the return statements below for the result; async results are Promises.
   async inspect(file, { signal } = {}) {
+    const inspectionSnapshot = await sourceIdentity(file);
     const stat = await fs.stat(file);
     if (!stat.isFile()) throw new Error('Please choose a file, not a folder.');
     if (!this.capabilities) await this.initialize();
@@ -229,12 +282,13 @@ class Engine {
       stream.audiorityCore = await this.inspectDtsCore(file, stream.index, signal);
     }
     const plan = this.plan(probe);
-    if (this.keepOriginal) for (const track of plan.tracks) if (track.action !== 'copy') track.keepOriginal = true;
+    for (const track of plan.tracks) if (track.action !== 'copy') track.keepOriginal = this.retainOriginal(track);
     if (!probe.streams.some(s => s.codec_type === 'audio')) throw new Error('No audio tracks found.');
     const subtitles = probe.streams.filter(s => s.codec_type === 'subtitle');
     const attachments = probe.streams.filter(s => s.codec_type === 'attachment');
     const fonts = attachments.filter(s => /\.(ttf|otf|ttc)$/i.test(s.tags?.filename || '') || /font|truetype|opentype/i.test(s.tags?.mimetype || ''));
-    return { file, name: path.basename(file), size: stat.size, duration: Number(probe.format?.duration) || 0, probe, plan,
+    if (!sameSource(inspectionSnapshot, await sourceIdentity(file))) throw new Error('Source changed during inspection. Import it again once writing has finished.');
+    return { file, inspectionSnapshot, name: path.basename(file), size: stat.size, duration: Number(probe.format?.duration) || 0, probe, plan,
       subtitleInfo: { count: subtitles.length, ass: subtitles.filter(s => ['ass', 'ssa'].includes(s.codec_name)).length, fonts: fonts.length, attachments: attachments.length } };
   }
   // Accepts job/output/signal; compares content and metadata with bounded parallel probes, throwing on mismatch.
@@ -245,15 +299,15 @@ class Engine {
         '-show_entries', 'stream=codec_name,width,height,pix_fmt,extradata_hash,color_range,color_space,color_transfer,color_primaries:stream_tags=:stream_disposition=:stream_side_data=:packet=data_hash:packet_side_data=', '-of', 'json'];
       const outputArgs = [...args]; outputArgs[outputArgs.indexOf('-select_streams') + 1] = `v:${ordinal}`;
       const hashes = await Promise.allSettled([
-        hashProbe(this.tools.ffprobe, [...args, item.file], signal, count => onVerification(`Checking video ${ordinal + 1}: source · ${count.toLocaleString()} packets checked`)),
-        hashProbe(this.tools.ffprobe, [...outputArgs, outputFile], signal, count => onVerification(`Checking video ${ordinal + 1}: output · ${count.toLocaleString()} packets checked`))
+        hashProbe(this.tools.ffprobe, [...args, item.file], signal, (count, activity) => onVerification(`Checking video ${ordinal + 1}: source · ${count.toLocaleString()} packets checked`, activity)),
+        hashProbe(this.tools.ffprobe, [...outputArgs, outputFile], signal, (count, activity) => onVerification(`Checking video ${ordinal + 1}: output · ${count.toLocaleString()} packets checked`, activity))
       ]);
       const failure = hashes.find(result => result.status === 'rejected');
       if (failure) throw failure.reason;
       if (hashes[0].value !== hashes[1].value) throw new Error(`Verification failed: copied video content or format changed (stream ${source.index}).`);
     }
   }
-  async verifySubtitles(item, outputFile, signal, onVerification = () => {}) {
+  async verifySubtitles(item, outputFile, signal, onVerification = () => {}, budget) {
     // Stream copy must preserve ASS style headers, subtitle packets and all
     // attachment payloads. No decode/render step is used or implied here.
     if (!item.plan.needsConversion) return;
@@ -263,7 +317,7 @@ class Engine {
     const abort = () => controller.abort();
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();
-    let next = 0, failure;
+    let failure;
     const verify = async source => {
       onVerification(`Checking ${source.codec_type === 'subtitle' ? 'subtitle' : 'attachment'} stream ${source.index}…`);
       // Select one stream; fingerprint codec header/font data and retain only relevant
@@ -281,17 +335,14 @@ class Engine {
       const ordinal = targets.filter(s => s.codec_type === source.codec_type).findIndex(s => s.index === source.index);
       const outputArgs = [...args]; outputArgs[outputArgs.indexOf('-select_streams') + 1] = `${source.codec_type === 'subtitle' ? 's' : 't'}:${ordinal}`;
       const [before, after] = await Promise.all([
-        track(hashProbe(this.tools.ffprobe, [...args, item.file], controller.signal, count => onVerification(`Checking ${source.codec_type} stream ${source.index}: source · ${count.toLocaleString()} packets checked`))),
-        track(hashProbe(this.tools.ffprobe, [...outputArgs, outputFile], controller.signal, count => onVerification(`Checking ${source.codec_type} stream ${source.index}: output · ${count.toLocaleString()} packets checked`)))
+        track(hashProbe(this.tools.ffprobe, [...args, item.file], controller.signal, (count, activity) => onVerification(`Checking ${source.codec_type} stream ${source.index}: source · ${count.toLocaleString()} packets checked`, activity))),
+        track(hashProbe(this.tools.ffprobe, [...outputArgs, outputFile], controller.signal, (count, activity) => onVerification(`Checking ${source.codec_type} stream ${source.index}: output · ${count.toLocaleString()} packets checked`, activity)))
       ]);
       if (before !== after) throw new Error(`Verification failed: subtitle/attachment content or metadata changed (stream ${source.index}).`);
     };
-    const worker = async () => {
-      while (next < targets.length && !controller.signal.aborted) {
-        const source = targets[next++];
-        try { await verify(source); }
-        catch (error) { if (!failure) failure = error; controller.abort(); }
-      }
+    const worker = async source => {
+      try { await verify(source); }
+      catch (error) { if (!failure) failure = error; controller.abort(); throw error; }
     };
     // Limit simultaneous readers: each stream launches an input/output pair.
     // Drain every child before conversion cleanup can remove the temporary MKV.
@@ -301,33 +352,74 @@ class Engine {
       promise.then(() => pending.delete(promise), () => pending.delete(promise));
       return promise;
     };
-    // Promise.all rejects early; separately drain each surviving hash process.
+    // A task can fail before its peer hash exits; separately drain those children.
     try {
-      await Promise.all(Array.from({ length: Math.min(2, targets.length) }, worker));
-      await Promise.allSettled([...pending]);
-      if (failure) throw failure;
-      if (signal?.aborted) throw new Error('Cancelled');
+      await verificationWorkers(targets, worker, { limit: () => budget?.limit() || 2, signal: controller.signal });
+    } catch (error) {
+      failure ||= error;
     } finally {
+      await Promise.allSettled([...pending]);
       signal?.removeEventListener('abort', abort);
     }
+    if (failure) throw failure;
+    if (signal?.aborted) throw new Error('Cancelled');
+  }
+  // One demux pass per file for every copied audio stream, with bounded hash state.
+  async verifyCopiedAudio(item, outputFile, signal, onVerification = () => {}, budget, outputProbe) {
+    const tracks = item.plan.tracks.map((track, ordinal) => ({ ...track, ordinal }))
+      .filter(track => track.action === 'copy' || track.keepOriginal);
+    if (!tracks.length) return;
+    const outputAudio = (outputProbe || await this.probe(outputFile, signal, 120000)).streams.filter(stream => stream.codec_type === 'audio');
+    const scan = async (file, source) => {
+      const fingerprints = audioFingerprints(tracks.map(track => source ? track.index : outputAudio[track.ordinal].index));
+      const size = await fs.stat(file).then(stat => stat.size);
+      const key = `Checking copied audio: ${source ? 'source' : 'output'}`;
+      let packets = 0, last = 0;
+      // FFprobe hashes all audio in this pass; filtering here preserves a single
+      // demux scan. Avoiding unselected hashes needs a separately benchmarked path.
+      await run(this.tools.ffprobe, ['-v', 'error', '-select_streams', 'a', '-show_packets', '-show_data_hash', 'sha256',
+        '-show_entries', 'packet=stream_index,pos,data_hash', '-of', 'compact=p=0:nk=0', file], { signal, idleTimeoutMs: 120000, onLine: line => {
+        if (!fingerprints.packet(line)) return;
+        packets++;
+        if (Date.now() - last >= 1000) {
+          last = Date.now();
+          const position = Number(line.match(/(?:^|\|)pos=(\d+)/)?.[1]);
+          onVerification(`${key} · ${packets} packets checked`, Number.isFinite(position) && size ? { fraction: position / size } : undefined);
+        }
+      } });
+      onVerification(key, { done: true });
+      return fingerprints.finish();
+    };
+    let before, after;
+    if ((budget?.limit() || 2) > 1) {
+      const results = await Promise.allSettled([scan(item.file, true), scan(outputFile, false)]);
+      const failed = results.find(result => result.status === 'rejected');
+      if (failed) throw failed.reason;
+      [before, after] = results.map(result => result.value);
+    } else { before = await scan(item.file, true); after = await scan(outputFile, false); }
+    if (before.some((entry, i) => entry.count !== after[i].count || entry.hash !== after[i].hash)) throw new Error('Verification failed: copied or retained original audio changed.');
   }
   // Accepts a planned job, folder and callbacks; returns verified output paths, warnings and size after publication.
-  async convert(item, directory, { signal, onProgress = () => {}, onVerification = () => {}, onTemporaryOutput = async () => {}, onPublished = async () => {}, preferences = preferencesDefaults() } = {}) {
+  async convert(item, directory, { signal, onProgress = () => {}, onVerification = () => {}, onStage = () => {}, onTemporaryOutput = async () => {}, onPublished = async () => {}, preferences = preferencesDefaults() } = {}) {
+    const started = performance.now(), timings = {};
+    const measure = async (name, operation) => {
+      const start = performance.now();
+      try { return await operation(); }
+      finally { timings[name] = (performance.now() - start) / 1000; }
+    };
     preferences = validatePreferences(preferences);
     // Use a local plan snapshot; never mutate the displayed queue during execution.
-    item = { ...item, plan: { ...item.plan, tracks: item.plan.tracks.map(track => ({ ...track, keepOriginal: track.action !== 'copy' && !!(track.keepOriginal || preferences.keepOriginal) })) } };
+    item = { ...item, plan: { ...item.plan, tracks: item.plan.tracks.map(track => ({ ...track, keepOriginal: track.action !== 'copy' && (this.profile?.retentionMode === 'replace' ? false : this.profile?.retentionMode === 'keep' || !!(track.keepOriginal || preferences.keepOriginal)) })) } };
+    if (item.plan.blocked || item.plan.tracks.some(track => track.blocked)) throw new Error('Conversion blocked: an explicit audio request cannot be fulfilled. Review the track plan; no media was written.');
     if (!item.plan.needsConversion) return { skipped: true, reason: 'No convertible tracks; original unchanged.' };
     const sourceSnapshot = await sourceIdentity(item.file);
+    if (item.inspectionSnapshot && !sameSource(item.inspectionSnapshot, sourceSnapshot)) throw new Error('Source changed since inspection. Remove and re-import this file before converting.');
     directory = await resolveOutputDirectory(directory, preferences.preserveFolders ? item.relativeDirectory || '' : '');
     const directoryStat = await fs.stat(directory);
     if (!directoryStat.isDirectory()) throw new Error('Output destination is not a folder.');
     await fs.access(directory, require('node:fs').constants.W_OK);
     const duration = item.duration;
-    const audioBytes = item.plan.tracks.reduce((sum, t) => {
-      if (t.action !== 'encode') return sum;
-      if (t.codec.startsWith('pcm_')) return sum + duration * Number(item.probe.streams.find(s => s.index === t.index)?.sample_rate || 48000) * 2 * 8;
-      return sum + duration * (t.codec === 'dca' ? 1411200 : 640000) / 8;
-    }, 0);
+    const audioBytes = estimatedAudioBytes(item);
     const space = await fs.statfs(directory);
     if (space.bavail * space.bsize < item.size + audioBytes + 64 * 1024 * 1024) throw new Error('Insufficient free space for a safe conversion.');
     const basename = `${path.parse(item.name).name}${preferences.outputSuffix}`;
@@ -348,25 +440,21 @@ class Engine {
       if (needsForcedSubtitleFlag(stream)) args.push(`-disposition:s:${outputIndex}`, '+forced');
     });
     let addedAudioCount = 0;
-    const originalAudio = item.plan.tracks.map(t => item.probe.streams.find(s => s.index === t.index));
     const duplicated = item.plan.tracks.map((track, i) => track.keepOriginal ? i : -1).filter(i => i >= 0);
-    const sourceDefault = originalAudio.findIndex(s => s.disposition?.default);
-    const defaultSource = sourceDefault >= 0 ? sourceDefault : (duplicated[0] ?? item.plan.tracks.findIndex(track => track.action !== 'copy'));
-    // Audio-relative indices: appended counterparts inherit their source's default.
-    // With no source default, prefer the first compatibility track if one exists.
-    const defaultOutput = duplicated.includes(defaultSource) ? item.plan.tracks.length + duplicated.indexOf(defaultSource) : defaultSource;
-    if (duplicated.length || (sourceDefault < 0 && defaultSource >= 0)) for (let i = 0; i < item.plan.tracks.length + duplicated.length; i++) {
-      const source = i < originalAudio.length ? originalAudio[i] : originalAudio[duplicated[i - originalAudio.length]];
+    // Explicit defaults prevent the muxer from silently choosing the first audio
+    // when filtering removed the original default (including copy-only jobs).
+    for (const entry of audioOutputMap(item)) {
+      const { source } = entry;
       const flags = Object.entries(source.disposition || {}).filter(([key, value]) => key !== 'default' && value).map(([key]) => key);
-      if (i === defaultOutput) flags.push('default');
-      args.push(`-disposition:a:${i}`, flags.join('+') || '0');
+      if (entry.default) flags.push('default');
+      args.push(`-disposition:a:${entry.ordinal}`, flags.join('+') || '0');
     }
     item.plan.tracks.forEach((track, i) => {
       if (track.action === 'copy') return;
       const targetIndex = track.keepOriginal ? item.plan.tracks.length + addedAudioCount++ : i;
       if (track.keepOriginal) {
         args.push('-map', `0:${track.index}`);
-        args.push(`-metadata:s:a:${targetIndex}`, `title=${track.title ? `${track.title} · ` : ''}Compatibility (${track.codec === 'dca' ? 'DTS' : track.codec.toUpperCase()})`);
+        args.push(`-metadata:s:a:${targetIndex}`, `title=${compatibilityTitle(track)}`);
       }
       // A bitstream filter removes DTS extensions without decoding/re-encoding the legacy core.
       if (track.action === 'extract') { args.push(`-bsf:a:${targetIndex}`, 'dca_core'); return; }
@@ -376,21 +464,7 @@ class Engine {
       if (track.codec === 'dca') args.push(`-strict:a:${targetIndex}`, 'experimental');
       if (track.bitrate) args.push(`-b:a:${targetIndex}`, track.bitrate);
       if (track.sampleRate) args.push(`-ar:a:${targetIndex}`, String(track.sampleRate));
-      const filters = [];
-      // aresample rematrixing combines weighted input channels into the requested speaker layout.
-      // Stereo means combining surround contributions into left/right, not just dropping speakers.
-      // rematrix_maxval limits mixing coefficients; it is not a guarantee against every clipping case.
-      if (track.downmix) filters.push(`aresample=out_chlayout=${track.layout}:rematrix_maxval=1`);
-      // Boost only the remixed 7.1 -> 5.1 center, not all dialogue or all channels.
-      // Gain needs headroom: 1.5x may clip loud center peaks; normalization is separate.
-      if (track.downmix && track.sourceLayout?.startsWith('7.1') && ['5.1', '5.1(side)'].includes(track.layout) &&
-          (preferences.dialogueBoost || this.profile?.dialogueBoost || this.profile?.settings?.dialogueBoost)) {
-        const surround = track.layout === '5.1(side)' ? ['SL', 'SR'] : ['BL', 'BR'];
-        filters.push(`pan=${track.layout}|FL=FL|FR=FR|FC=1.5*FC|LFE=LFE|${surround[0]}=${surround[0]}|${surround[1]}=${surround[1]}`);
-      }
-      // dynaudnorm adjusts time-varying gain (150 ms frames, 15-frame smoothing window).
-      // It changes overall dynamics, not dialogue independently, and only runs on encoded tracks.
-      if (preferences.normalizeVolume || this.profile?.settings?.normalizeVolume) filters.push('dynaudnorm=f=150:g=15');
+      const filters = require('./audio-processing').audioFilters(track, preferences, this.profile);
       if (filters.length) args.push(`-filter:a:${targetIndex}`, filters.join(','));
       // Explicit layout prevents automatic downmixing to another encoder layout.
       args.push(`-channel_layout:a:${targetIndex}`, track.layout);
@@ -403,36 +477,45 @@ class Engine {
     }
     // Explicitly retain attachment codecs even when appended audio changes stream order.
     args.push('-c:t', 'copy', '-progress', 'pipe:1', '-nostats', '-f', 'matroska', temp);
+    const budget = createResourceBudget(preferences.performanceMode);
     try {
       await onTemporaryOutput(temp);
-      await run(this.tools.ffmpeg, args, { signal, onLine: line => {
+      onStage('Converting', 'Writing temporary MKV…');
+      await measure('conversion', () => run(this.tools.ffmpeg, args, { signal, onLine: line => {
         if (line.startsWith('out_time_us=')) {
           const elapsed = Number(line.slice(12));
           if (Number.isFinite(elapsed)) onProgress(Number.isFinite(duration) && duration > 0 ? Math.min(0.99, Math.max(0, elapsed / 1e6 / duration)) : 0);
         }
-      } });
+      } }));
       if (signal?.aborted) throw new Error('Cancelled');
+      // Persist the completed partial's identity before verification. Interrupted
+      // writes without a saved identity are retained rather than guessed at.
+      await onTemporaryOutput(temp, await sourceIdentity(temp));
       // Process exit, not its final timestamp, starts verification. Complete is sent only after publication.
       onProgress(0.99);
+      onStage('Verifying', 'Checking output structure…');
+      const retained = item.probe.streams.filter(stream => !(item.plan.droppedStreams || []).includes(stream.index));
+      const trackVerification = require('./verification-progress').verificationPhases({
+        video: retained.filter(stream => stream.codec_type === 'video').length * 2,
+        audio: item.plan.tracks.some(track => track.action === 'copy' || track.keepOriginal) ? 2 : 0,
+        subtitle: retained.filter(stream => stream.codec_type === 'subtitle').length * 2,
+        attachment: retained.filter(stream => stream.codec_type === 'attachment').length * 2
+      });
+      const reportVerification = onVerification;
+      onVerification = (label, activity) => reportVerification(label, trackVerification(label.split(' · ')[0], activity));
       onVerification('Checking output structure…');
-      const output = await this.probe(temp, signal, 120000);
-      verifyOutput(item, output);
-      await this.verifyVideo(item, temp, signal, onVerification);
-      for (const [i, track] of item.plan.tracks.entries()) if (track.keepOriginal) {
-        // a:i means the i-th audio stream (not absolute stream index). Compare compressed
-        // packet payload hashes to prove copied/retained audio bytes were not re-encoded.
-        onVerification(`Checking retained audio ${i + 1}…`);
-        const hashArgs = ['-v', 'error', '-select_streams', `a:${i}`, '-show_packets', '-show_data_hash', 'sha256', '-show_entries', 'packet=data_hash:packet_side_data=', '-of', 'json'];
-        const inputArgs = [...hashArgs]; inputArgs[inputArgs.indexOf('-select_streams') + 1] = String(track.index);
-        const hashes = await Promise.allSettled([
-          hashProbe(this.tools.ffprobe, [...inputArgs, item.file], signal, count => onVerification(`Checking retained audio ${i + 1}: source · ${count.toLocaleString()} packets checked`)),
-          hashProbe(this.tools.ffprobe, [...hashArgs, temp], signal, count => onVerification(`Checking retained audio ${i + 1}: output · ${count.toLocaleString()} packets checked`))
-        ]);
-        const failure = hashes.find(result => result.status === 'rejected');
-        if (failure) throw failure.reason;
-        if (hashes[0].value !== hashes[1].value) throw new Error(`Verification failed: retained original audio changed (track ${i + 1}).`);
-      }
-      await this.verifySubtitles(item, temp, signal, onVerification);
+      const output = await measure('structure', async () => {
+        const probe = await this.probe(temp, signal, 120000);
+        verifyOutput(item, probe);
+        return probe;
+      });
+      await measure('video', () => this.verifyVideo(item, temp, signal, onVerification));
+      await measure('audio', () => this.verifyCopiedAudio(item, temp, signal, onVerification, budget, output));
+      await measure('subtitlesAndAttachments', () => this.verifySubtitles(item, temp, signal, onVerification, budget));
+      const conversionReport = require('./conversion-report').conversionReport(item, output, preferences, this.profile);
+      if (!sameSource(sourceSnapshot, await sourceIdentity(item.file))) throw new Error('Source changed during processing. Output was not published; re-import the source.');
+      onStage('Publishing', 'Publishing verified output…');
+      const publicationStarted = performance.now();
       const { destination, copied } = await publishOutput(temp, directory, basename, { signal });
       // Removing the private hard link changes ctime; snapshot the final file afterward.
       publicationCleanupAttempted = true;
@@ -442,7 +525,10 @@ class Engine {
         if (error.code !== 'ENOENT') cleanupWarning = `Media published and verified, but temporary file cleanup failed: ${temp} — ${error.message}`;
       }
       const outputSnapshot = await sourceIdentity(destination);
-      await onPublished({ output: destination, outputSnapshot });
+      // Cleanup trouble must not prevent the published destination being recorded.
+      const temporaryOutputSnapshot = cleanupWarning ? await sourceIdentity(temp).catch(() => undefined) : undefined;
+      await onPublished({ output: destination, outputSnapshot,
+        ...(temporaryOutputSnapshot ? { temporaryOutputSnapshot } : {}) });
       const warnings = [...item.plan.warnings, ...(item.importWarnings || [])];
       if (cleanupWarning) warnings.push(cleanupWarning);
       if (copied) warnings.push('Hard links unavailable: output published using an exclusive copy. The destination was visible during copying.');
@@ -461,9 +547,15 @@ class Engine {
           sidecars.push(target);
         } catch (error) { warnings.push(`External subtitle not copied/verified: ${path.basename(sidecar.file)} — ${error.message}`); }
       }
+      timings.publication = (performance.now() - publicationStarted) / 1000;
+      timings.total = (performance.now() - started) / 1000;
       onProgress(1);
-      return { output: destination, warnings, sidecars, verifiedSidecars, sourceSnapshot, outputSnapshot, outputBytes: outputSnapshot.size };
+      return { output: destination, warnings, sidecars, verifiedSidecars, sourceSnapshot, outputSnapshot, outputBytes: outputSnapshot.size, timings, conversionReport };
+    } catch (error) {
+      if (!signal?.aborted && !publicationCleanupAttempted) error.message += ' Temporary output was not published and is scheduled for cleanup; source media was not modified.';
+      throw error;
     } finally {
+      budget.close();
       // A second unlink after snapshotting would change the hard-linked output's
       // ctime. Leave a failed cleanup for startup rather than invalidating identity.
       if (!publicationCleanupAttempted) await fs.unlink(temp).catch(() => {});
@@ -478,6 +570,11 @@ function verifyOutput(item, output) {
   if (output.streams.length !== sourceStreams.length + added) throw new Error('Verification failed: stream count changed.');
   const audio = output.streams.filter(s => s.codec_type === 'audio');
   if (audio.length !== item.plan.tracks.length + added) throw new Error('Verification failed: audio track count changed.');
+  for (const entry of audioOutputMap(item)) {
+    const actual = audio[entry.ordinal];
+    if (Number(!!actual.disposition?.default) !== entry.default) throw new Error(`Verification failed: default audio flag changed for output track ${entry.ordinal + 1}.`);
+    if ((actual.tags?.language || 'und') !== entry.language || (actual.tags?.title || '') !== entry.title) throw new Error(`Verification failed: audio language/title changed for output track ${entry.ordinal + 1}.`);
+  }
   let addedIndex = item.plan.tracks.length;
   for (const [i, track] of item.plan.tracks.entries()) {
     if (track.keepOriginal && track.action !== 'copy') {
@@ -487,6 +584,7 @@ function verifyOutput(item, output) {
     const actual = track.keepOriginal && track.action !== 'copy' ? audio[addedIndex++] : audio[i];
     const expectedCodec = track.codec === 'dca' ? 'dts' : track.codec;
     if (actual.codec_name !== expectedCodec || actual.channels !== track.channels) throw new Error(`Verification failed: codec or channel count changed for audio track ${i + 1}.`);
+    if (track.action === 'encode' && track.sampleRate && Number(actual.sample_rate) !== Number(track.sampleRate)) throw new Error(`Verification failed: sample rate changed for audio track ${i + 1}.`);
     if (track.action === 'extract' && (sourceFormat(actual) !== 'dts' || Number(actual.sample_rate) !== track.sampleRate)) throw new Error('Verification failed: extracted DTS core properties differ from plan.');
     // Matroska PCM often omits a layout field; its two-channel output uses
     // standard interleaved left/right order. Never infer multichannel layouts.

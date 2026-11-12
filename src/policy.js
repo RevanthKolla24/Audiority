@@ -17,9 +17,33 @@ function classify(stream) {
   return LOSSY.has(codec) ? 'lossy' : 'unknown';
 }
 
+// Resolve scope precedence once for both action selection and request blocking.
+function effectiveRule(stream, profile) {
+  if (profile?.conversionMode === 'dts-core' || profile?.excludedFormats?.includes(sourceFormat(stream))) return null;
+  const layout = stream.channel_layout || (stream.codec_name?.startsWith('pcm_') && Number(stream.channels) === 2 ? 'stereo' : undefined);
+  const scope = Number(stream.channels) === 2 && layout === 'stereo' ? 'stereo' : 'surround';
+  const matches = (profile?.rules || []).filter(rule => rule.source === sourceFormat(stream) && (rule.scope === scope || rule.scope === 'any'));
+  return matches.find(rule => rule.scope === scope) || matches[0];
+}
+
 // Plan track: receives stream, capabilities, profile. See the return statements below for the result; async results are Promises.
 function planTrack(stream, capabilities, profile) {
   const track = planTrackAction(stream, capabilities, profile);
+  track.sourceFormat = sourceFormat(stream);
+  track.sourceProfile = stream.profile || '';
+  const rule = effectiveRule(stream, profile);
+  if (profile?.systemExplanation && profile.layoutPolicy !== 'legacy') track.reason += ` ${profile.systemExplanation}`;
+  if (profile?.conversionMode === 'playback' && profile.layoutPolicy === 'fixed' && track.action === 'copy' &&
+      track.layout !== profile.speakerLayout) {
+    // A layout difference alone is informational; preserve compatibility warnings.
+    track.reason += ` Fixed-layout exception: this original remains ${track.layout || 'unknown layout'}, not ${profile.speakerLayout}. No upmix or override of exclusions/keep rules is performed; playback-system handling may still be required.`;
+  }
+  const explicit = profile?.conversionMode === 'dts-core' && sourceFormat(stream) === 'dtshd' || rule && !['auto', 'copy'].includes(rule.target);
+  if (explicit && track.compatibility === 'unresolved') track.blocked = true;
+  if (profile?.conversionMode === 'manual' && track.action !== 'copy') {
+    track.compatibility = 'playback-unconfirmed';
+    track.reason += ' Explicit output request; playback compatibility is not confirmed.';
+  }
   if (track.action !== 'copy') track.keepOriginal = !!profile?.keepOriginal;
   return track;
 }
@@ -62,6 +86,12 @@ function planProfileTrack(stream, capabilities, profile) {
   let layout = stream.channel_layout || (codec.startsWith('pcm_') && channels === 2 ? 'stereo' : undefined);
   const base = { index: stream.index, sourceCodec: codec, channels, layout, language: stream.tags?.language || 'und', title: stream.tags?.title || '', action: 'copy', codec, reason: '', compatibility: 'unresolved' };
   const unresolved = reason => ({ ...base, warning: true, reason: `Unresolved compatibility: ${reason} Original retained; playback is not guaranteed.` });
+  if (profile.conversionMode === 'dts-core') {
+    if (format !== 'dtshd') return { ...base, compatibility: 'unchanged', reason: 'DTS-core-only mode: this non-DTS-HD track is copied unchanged; playback support is not inferred.' };
+    const core = stream.audiorityCore;
+    if (!core || !Number.isInteger(core.channels) || core.channels < 1 || core.channels > 6 || !core.layout || !(core.sampleRate > 0 && core.sampleRate <= 48000)) return unresolved('DTS core extraction explicitly requested, but no suitable core was verified. No substitute encode will be used.');
+    return { ...base, action: 'extract', codec: 'dts', channels: core.channels, layout: core.layout, sourceChannels: channels, sourceLayout: layout, sampleRate: core.sampleRate, compatibility: 'playback-unconfirmed', reason: `Extract existing DTS core (${core.layout}); no additional lossy encoding. Playback compatibility is not confirmed.` };
+  }
   let isStereo = channels === 2 && layout === 'stereo';
   const bits = Number(stream.bits_per_raw_sample || stream.bits_per_sample) || (stream.sample_fmt?.includes('64') ? 64 : 32);
   const floating = /pcm_f|pcm_alaw|pcm_mulaw/.test(codec);
@@ -70,13 +100,18 @@ function planProfileTrack(stream, capabilities, profile) {
   const sourceRate = Number(stream.sample_rate);
   const rateCeilings = { dts: 48000, ac3: 48000, eac3: 48000, dtshd: 192000, truehd: 192000 };
   const supported = profile.supported.includes(format) && channels > 0 && channels <= (maxChannels[format] || 8) && (format !== 'pcm' || withinPcm) && sourceRate > 0 && sourceRate <= (rateCeilings[format] || profile.pcmRate);
-  const scope = isStereo ? 'stereo' : 'surround';
-  const matches = profile.rules.filter(r => r.source === format && (r.scope === scope || r.scope === 'any'));
-  const rule = matches.find(r => r.scope === scope) || matches[0];
+  const rule = effectiveRule(stream, profile);
   if (profile.excludedFormats?.includes(format)) return { ...base, compatibility: supported ? 'supported' : 'unresolved', warning: !supported, reason: 'Excluded from conversion by this profile; copied unchanged.' + (!supported ? ' Playback compatibility is not confirmed.' : '') };
   if (rule?.target === 'copy') return supported ? { ...base, compatibility: 'supported', reason: 'Custom keep-original rule; supported by configured playback profile.' } : unresolved('custom keep-original rule conflicts with configured capabilities.');
   const forced = rule && rule.target !== 'auto' ? rule.target : null;
   const downmix = profile.allowDownmix && profile.downmixRules?.find(r => r.source === layout);
+  if (profile.conversionMode === 'playback' && profile.layoutPolicy === 'fixed') {
+    const limit = require('./system-audio-policy').speakerCounts[profile.speakerLayout];
+    if (channels > limit && !downmix) return unresolved('source speaker layout has no approved mapping to the installed speakers; no positional guessing is allowed.');
+    if (channels === limit && layout !== profile.speakerLayout) return unresolved('source speaker positions differ from the fixed target; equal channel counts do not justify relabeling.');
+  }
+  // Keep old profiles readable, but never silently manufacture a center speaker.
+  if (downmix && layout === '6.1(front)' && downmix.target !== 'stereo') return unresolved('6.1(front) has no discrete center; choose stereo or retain the original instead of a center-equipped output.');
   if (!forced && !downmix && profile.preserve && supported) return { ...base, compatibility: 'supported', reason: 'Supported by configured receiver/playback path; copied unchanged.' };
   if (!Number.isInteger(channels) || channels < 1 || !layout) return unresolved('unknown channel layout; no downmix or layout guessing allowed.');
   const core = stream.audiorityCore;
@@ -134,7 +169,7 @@ function languageDrops(probe, profile) {
 function planFile(probe, capabilities, profile) {
   const droppedStreams = languageDrops(probe, profile);
   const tracks = (probe.streams || []).filter(s => s.codec_type === 'audio' && !droppedStreams.includes(s.index)).map(s => planTrack(s, capabilities, profile));
-  return { tracks, droppedStreams, streamsToDrop: droppedStreams.map(index => `0:${index}`), needsConversion: droppedStreams.length > 0 || tracks.some(t => t.action !== 'copy'), warnings: [...(profile?.warnings || []), ...(droppedStreams.length ? [`Language filter removes ${droppedStreams.length} embedded audio/subtitle stream(s).`] : []), ...tracks.filter(t => t.warning).map(t => t.reason)], unresolved: tracks.some(t => t.compatibility === 'unresolved') };
+  return { tracks, blocked: tracks.some(t => t.blocked), droppedStreams, streamsToDrop: droppedStreams.map(index => `0:${index}`), needsConversion: droppedStreams.length > 0 || tracks.some(t => t.action !== 'copy'), warnings: [...(profile?.warnings || []), ...(droppedStreams.length ? [`Language filter removes ${droppedStreams.length} embedded audio/subtitle stream(s).`] : []), ...tracks.filter(t => t.warning).map(t => t.reason)], unresolved: tracks.some(t => t.compatibility === 'unresolved') };
 }
 
 module.exports = { classify, planTrack, planFile, languageDrops };

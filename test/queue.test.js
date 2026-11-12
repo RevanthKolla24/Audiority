@@ -62,7 +62,7 @@ test('recovery cleanup removes exact interrupted partial only, never other outpu
     const temp = path.join(directory, '.source.audiority.12345678-1234-1234-1234-123456789abc.partial.mkv');
     const other = path.join(directory, '.other.12345678-1234-1234-1234-123456789abc.partial.mkv');
     await Promise.all([file, temp, other].map(p => fs.writeFile(p, 'keep')));
-    await cleanupInterrupted([{ file, status: 'Verifying', temporaryOutput: temp }]);
+    await cleanupInterrupted([{ file, status: 'Verifying', temporaryOutput: temp, temporaryOutputSnapshot: await require('../src/source-safety').sourceIdentity(temp) }]);
     await assert.rejects(fs.access(temp));
     assert.equal(await fs.readFile(other, 'utf8'), 'keep');
     await fs.symlink(file, temp);

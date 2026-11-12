@@ -6,7 +6,7 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: read
 
 # Do not interrupt a release that is already uploading installers.
 concurrency:
@@ -25,12 +25,13 @@ jobs:
       GIT_LFS_SKIP_SMUDGE: '1'
     steps:
       - name: Checkout source without LFS binaries
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           lfs: false
+          persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
           cache: npm
@@ -83,21 +84,25 @@ jobs:
       - name: Run regression tests
         run: npm test
 
+      - name: Run desktop GUI smoke tests
+        run: npm run test:ui
+
       - name: Build unsigned macOS installer
         # Only the upload step publishes; avoid electron-builder's tag auto-publish.
         run: npm run dist:mac -- --publish never
 
-      - name: Upload macOS installers and update metadata
-        uses: softprops/action-gh-release@v2
+      - name: Validate packaged macOS resources and tools
+        run: node scripts/validate-packaged-app.js mac
+
+      - name: Stage validated macOS installers and update metadata
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          files: |
+          name: release-mac
+          path: |
             dist/*.dmg
             dist/*.zip
             dist/latest-mac.yml
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          if-no-files-found: error
 
   windows:
     name: Windows x64
@@ -110,12 +115,13 @@ jobs:
       GIT_LFS_SKIP_SMUDGE: '1'
     steps:
       - name: Checkout source without LFS binaries
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           lfs: false
+          persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
           cache: npm
@@ -174,17 +180,74 @@ jobs:
       - name: Run regression tests
         run: npm test
 
+      - name: Run desktop GUI smoke tests
+        run: npm run test:ui
+
       - name: Build unsigned Windows installer
         run: npm run dist:win -- --publish never
 
-      - name: Upload Windows installer and update metadata
-        uses: softprops/action-gh-release@v2
+      - name: Validate Windows update assets
+        run: node scripts/validate-update-assets.js
+
+      - name: Validate packaged Windows resources and tools
+        run: node scripts/validate-packaged-app.js win
+
+      - name: Stage Windows installer and update metadata
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          files: |
+          name: release-windows
+          path: |
             dist/*.exe
             dist/latest.yml
             dist/*.exe.blockmap
+          if-no-files-found: error
+
+  publish:
+    name: Publish complete cross-platform release
+    needs: [mac, windows]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          lfs: false
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+      - name: Validate staged Windows feed again
+        run: node scripts/validate-update-assets.js release-assets
+      - name: Refuse to overwrite an already published release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" --json isDraft > "$RUNNER_TEMP/release.json" 2> "$RUNNER_TEMP/release-error"; then
+            node -e 'if (!require(process.argv[1]).isDraft) throw new Error("Release is already published; refusing to replace live assets.")' "$RUNNER_TEMP/release.json"
+          elif ! grep -qi 'release not found' "$RUNNER_TEMP/release-error"; then
+            cat "$RUNNER_TEMP/release-error" >&2
+            exit 1
+          fi
+      - name: Upload all assets to a draft
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          draft: true
+          files: |
+            release-assets/*.dmg
+            release-assets/*.zip
+            release-assets/latest-mac.yml
+            release-assets/*.exe
+            release-assets/latest.yml
+            release-assets/*.exe.blockmap
           generate_release_notes: true
           fail_on_unmatched_files: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish only after every asset upload succeeds
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false
