@@ -14,7 +14,9 @@ function validatePackagedApp(target, directory = path.resolve(__dirname, '../dis
   if (candidates.length !== 1) throw new Error(`Expected one packaged application, found ${candidates.length}.`);
   const resources = candidates[0], archive = path.join(resources, 'app.asar');
   for (const file of ['package.json', 'src/main.js', 'src/preload.js', 'src/windows-menu.js', 'src/ui/index.html', 'src/ui/platform.js', 'src/ui/windows-desktop.js', 'src/ui/windows-desktop.css', 'src/assets/logo.png']) {
-    if (!asar.extractFile(archive, file).length) throw new Error(`Empty packaged resource: ${file}`);
+    // The installed ASAR reader traverses using path.sep, even inside archives.
+    // Normalize logical resource paths for the host running this validation.
+    if (!asar.extractFile(archive, path.normalize(file)).length) throw new Error(`Empty packaged resource: ${file}`);
   }
   const packaged = JSON.parse(asar.extractFile(archive, 'package.json').toString());
   if (packaged.version !== require('../package.json').version) throw new Error('Packaged version does not match source.');
