@@ -521,7 +521,8 @@ app.on('browser-window-created', (_event, window) => {
       })()`), true);
       // A paused final job must finish the run without requiring Resume or Cancel.
       await waitFor(`!running && !queuePaused && $('pause').hidden`);
-      assert.deepEqual(trashedSources.map(file => fs.realpathSync(file)), [path.join(show, 'Episode 01.mkv')].map(file => fs.realpathSync(file)));
+      // Native resolution expands Windows 8.3 aliases consistently on both sides.
+      assert.deepEqual(trashedSources.map(file => fs.realpathSync.native(file)), [path.join(show, 'Episode 01.mkv')].map(file => fs.realpathSync.native(file)));
       assert.ok(fs.existsSync(path.join(show, 'Episode 01.eng.srt')));
       dialog.showMessageBox = originalMessageBox;
       assert.ok(fs.existsSync(trashedSources[0]));
