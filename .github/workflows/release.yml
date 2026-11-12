@@ -139,11 +139,24 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          function Get-ReleaseDownload([string]$Uri, [string]$Destination) {
+            for ($attempt = 1; $attempt -le 4; $attempt++) {
+              try {
+                Invoke-WebRequest -Uri $Uri -OutFile $Destination -TimeoutSec 600
+                return
+              } catch {
+                Remove-Item $Destination -Force -ErrorAction SilentlyContinue
+                if ($attempt -eq 4) { throw }
+                Write-Warning "Download attempt $attempt failed for $Uri; retrying."
+                Start-Sleep -Seconds (5 * $attempt)
+              }
+            }
+          }
           $work = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString())
           New-Item -ItemType Directory -Path $work | Out-Null
           try {
             $zip = Join-Path $work 'ffmpeg.zip'
-            Invoke-WebRequest -Uri 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile $zip
+            Get-ReleaseDownload 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' $zip
             Expand-Archive -Path $zip -DestinationPath (Join-Path $work 'expanded')
             # Remove LFS pointers before populating target-specific resources.
             if (Test-Path legal-tools-win) { Remove-Item legal-tools-win -Recurse -Force }
@@ -153,7 +166,7 @@ jobs:
               if ($matches.Count -ne 1) { throw "Expected one $tool in the downloaded archive." }
               Copy-Item $matches[0].FullName (Join-Path 'legal-tools-win' $tool)
             }
-            Invoke-WebRequest -Uri 'https://www.gnu.org/licenses/gpl-3.0.txt' -OutFile legal-tools-win/ffmpeg-license.txt
+            Get-ReleaseDownload 'https://www.gnu.org/licenses/gpl-3.0.txt' 'legal-tools-win/ffmpeg-license.txt'
             if (-not (Select-String -Path legal-tools-win/ffmpeg-license.txt -Pattern 'GNU GENERAL PUBLIC LICENSE' -Quiet)) {
               throw 'Downloaded license is not GPL text.'
             }

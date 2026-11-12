@@ -67,11 +67,11 @@ test('installer exceptions and emitted errors roll back shutdown locks and allow
   }
 });
 
-test('main-process install rollback restores shutdown gates and watch polling without removing update listeners', async () => {
+for (const newline of ['\n', '\r\n']) test(`main-process install rollback restores shutdown gates and polling (${JSON.stringify(newline)})`, async () => {
   const fs = require('node:fs');
   const path = require('node:path');
   const vm = require('node:vm');
-  const source = fs.readFileSync(path.join(__dirname, '../src/main.js'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, '../src/main.js'), 'utf8').replace(/\r\n/g, '\n').replace(/\n/g, newline).replace(/\r\n/g, '\n');
   let options, polls = 0, stopped = 0, saved = 0;
   const context = vm.createContext({
     startUpdates: value => { options = value; return () => stopped++; },

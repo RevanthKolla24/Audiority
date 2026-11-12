@@ -52,8 +52,8 @@ test('release validation rejects missing notices and wrong-platform tools withou
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
-test('release builds have read-only tokens and every external action uses an immutable revision', () => {
-  const workflow = fs.readFileSync(path.join(root, '.github/workflows/release.yml'), 'utf8');
+for (const newline of ['\n', '\r\n']) test(`release builds have read-only tokens and immutable actions (${JSON.stringify(newline)})`, () => {
+  const workflow = fs.readFileSync(path.join(root, '.github/workflows/release.yml'), 'utf8').replace(/\r\n/g, '\n').replace(/\n/g, newline).replace(/\r\n/g, '\n');
   assert.match(workflow, /\npermissions:\n  contents: read\n/);
   assert.equal((workflow.match(/contents: write/g) || []).length, 1);
   assert.match(workflow, /  publish:[\s\S]*?    permissions:\n      contents: write/);

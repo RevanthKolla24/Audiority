@@ -124,7 +124,11 @@ test('offline outputs block cleanup only when their saved identity could match t
       }
       for (const key of ['dev', 'ino']) {
         const current = await fs.lstat(temp);
-        const outputSnapshot = { ...snapshot, dev: current.dev, ino: current.ino, [key]: current[key] + 1 };
+        // Windows inode numbers can exceed Number.MAX_SAFE_INTEGER; +1 may
+        // round back to the same value and fail to create a distinct fixture.
+        const different = current[key] === 0 ? 1 : 0;
+        assert.notEqual(different, current[key]);
+        const outputSnapshot = { ...snapshot, dev: current.dev, ino: current.ino, [key]: different };
         assert.equal(await cleanupOrphanedTempFiles(root, { io, items: [{ output, outputSnapshot, temporaryOutput: temp, temporaryOutputSnapshot: await sourceIdentity(temp) }] }), 1);
         await fs.writeFile(temp, 'media');
       }
