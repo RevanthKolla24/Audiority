@@ -234,7 +234,7 @@ function enterWorkspace(profile) {
   if (typeof showPage === 'function') showPage('queue');
   $('setup').hidden = true; $('workspace').hidden = false;
   $('view-title').textContent = 'Conversion queue';
-  $('active-profile').textContent = `${profileText(profile)} · ${effectivePolicyText(profile)}`;
+  $('active-profile').textContent = profileText(profile);
   $('profile-policy-detail').textContent = effectivePolicyText(profile);
   if (api.platform === 'win32') $('active-profile').textContent = profileText(profile);
   $('active-warnings').replaceChildren(...profile.warnings.map(w => element('p', 'warning-text', w)));
@@ -357,6 +357,7 @@ async function performProfile(action) {
 }
 // Open profile dialog: receives type. Updates state or visible controls; callers use the side effect.
 function openProfileDialog(type) {
+  $('profile-actions-menu').open = false;
   if (running || importing || managingProfiles) return;
   const record = setupData.library.profiles.find(p => p.id === setupData.library.activeId);
   if (!record) return;
@@ -372,6 +373,15 @@ function openProfileDialog(type) {
 $('new-profile').addEventListener('click', () => { openSetup(true); renderProfiles(); });
 $('profile-search').addEventListener('input', renderProfiles);
 for (const type of ['rename', 'duplicate', 'delete']) $(`${type}-profile`).addEventListener('click', () => openProfileDialog(type));
+$('profile-actions-menu').addEventListener('keydown', event => {
+  if (event.key === 'Escape') {
+    $('profile-actions-menu').open = false;
+    $('profile-actions-menu').querySelector('summary').focus();
+  }
+});
+document.addEventListener('click', event => {
+  if (!$('profile-actions-menu').contains(event.target)) $('profile-actions-menu').open = false;
+});
 $('dialog-cancel').addEventListener('click', () => $('profile-dialog').close());
 $('profile-dialog-form').addEventListener('submit', async event => {
   event.preventDefault(); $('dialog-confirm').disabled = true;

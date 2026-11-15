@@ -1,0 +1,71 @@
+name: Non-publishing Windows validation
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    # Hosted Windows is native execution, not installed Windows 11 acceptance.
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      GIT_LFS_SKIP_SMUDGE: '1'
+      AUDIORITY_FFMPEG: ./legal-tools-win/ffmpeg.exe
+      AUDIORITY_FFPROBE: ./legal-tools-win/ffprobe.exe
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          lfs: false
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Download native tools and provider notices
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $work = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString())
+          New-Item -ItemType Directory -Path $work | Out-Null
+          try {
+            Invoke-WebRequest 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile "$work/ffmpeg.zip" -TimeoutSec 600
+            Expand-Archive "$work/ffmpeg.zip" "$work/expanded"
+            if (Test-Path legal-tools-win) { Remove-Item legal-tools-win -Recurse -Force }
+            New-Item -ItemType Directory legal-tools-win | Out-Null
+            foreach ($tool in @('ffmpeg.exe', 'ffprobe.exe')) {
+              $matches = @(Get-ChildItem "$work/expanded" -Recurse -File -Filter $tool)
+              if ($matches.Count -ne 1) { throw "Expected one $tool" }
+              Copy-Item $matches[0].FullName "legal-tools-win/$tool"
+            }
+            Invoke-WebRequest 'https://www.gnu.org/licenses/gpl-3.0.txt' -OutFile legal-tools-win/ffmpeg-license.txt -TimeoutSec 120
+            New-Item -ItemType Directory legal-tools-win/provider-notices | Out-Null
+            Get-ChildItem "$work/expanded" -Recurse -File |
+              Where-Object { $_.Name -match '^(LICENSE|COPYING|README)' } |
+              ForEach-Object { Copy-Item $_.FullName "legal-tools-win/provider-notices/$($_.Name)" }
+            Get-FileHash legal-tools-win/*.exe -Algorithm SHA256 | Format-List | Out-File legal-tools-win/build-info.txt
+            & ./legal-tools-win/ffmpeg.exe -version | Add-Content legal-tools-win/build-info.txt
+            if ($LASTEXITCODE -ne 0) { throw 'FFmpeg execution failed' }
+            & ./legal-tools-win/ffprobe.exe -version | Add-Content legal-tools-win/build-info.txt
+            if ($LASTEXITCODE -ne 0) { throw 'FFprobe execution failed' }
+          } finally { Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue }
+      - run: npm run prepare:tools -- win
+      - run: npm test
+      - run: npm run test:ui
+      - run: npm run test:restart
+      - name: Package without publishing
+        run: npm run dist:win -- --publish never
+      - run: node scripts/validate-packaged-app.js win
+      - run: node scripts/validate-update-assets.js
+      - name: Save tool provenance
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-validation-tool-provenance
+          path: legal-tools-win/build-info.txt
+          if-no-files-found: warn

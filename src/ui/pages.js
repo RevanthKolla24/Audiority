@@ -4,6 +4,11 @@
  * Learning note: async functions return Promises; await gets their result and try/catch handles failure.
  */
 let currentPage = 'queue', preferencesData;
+let preferencesDirty = false;
+function updatePreferencesDraftState() {
+  $('settings-dirty').textContent = preferencesDirty ? 'Unsaved changes' : '';
+  $('settings-discard').hidden = !preferencesDirty;
+}
 function renderUpdateState(state) {
   const labels = { disabled: 'Automatic updates are available in installed Windows/macOS builds, not development runs.', idle: 'Ready to check.', checking: 'Checking for updates…', current: 'You are up to date.', downloading: `Downloading ${state.version || 'update'} · ${Math.floor(state.percent || 0)}%`, ready: `Version ${state.version} is ready. Installation waits until work is idle.`, available: `Version ${state.version} is available for manual download on macOS.`, installing: 'Saving queue and starting installer…', error: `Update failed: ${state.error}. You can retry below.` };
   $('update-status').textContent = labels[state.status] || 'Update status unavailable.';
@@ -24,6 +29,8 @@ function applyPreferences(value) {
 }
 // Fill preferences: receives data. See the return statements below for the result; async results are Promises.
 function fillPreferences(data) {
+  preferencesDirty = false;
+  updatePreferencesDraftState();
   preferencesData = data;
   $('pref-watchEnabled').checked = data.preferences.watchEnabled;
   $('settings-watch-folder').textContent = data.preferences.watchFolder || 'No watch folder selected';
@@ -36,8 +43,9 @@ function fillPreferences(data) {
   applyPreferences(data.preferences);
   $('trash-warning').hidden = !data.preferences.trashOriginals;
   output = data.outputDirectory || ''; syncOutputFolder();
+  if (typeof invalidateBatchPreview === 'function') invalidateBatchPreview();
   if (typeof setupData !== 'undefined' && setupData?.profile && typeof effectivePolicyText === 'function') {
-    $('active-profile').textContent = api.platform === 'win32' ? profileText(setupData.profile) : `${profileText(setupData.profile)} · ${effectivePolicyText(setupData.profile)}`;
+    $('active-profile').textContent = profileText(setupData.profile);
     $('profile-policy-detail').textContent = effectivePolicyText(setupData.profile);
   }
   renderPresetThemes();
@@ -85,20 +93,29 @@ async function navigatePage(name) {
   }
   let data;
   try {
-    if (name === 'settings') data = await api.getAppSettings();
+    if (name === 'settings' && !(typeof preferencesDirty !== 'undefined' && preferencesDirty)) data = await api.getAppSettings();
     if (name === 'statistics') data = await api.getStatistics();
   } catch (error) {
     if (version !== navigationVersion || profileEditing) return;
     throw error;
   }
   if (version !== navigationVersion || profileEditing) return;
-  if (name === 'settings') fillPreferences(data);
+  if (name === 'settings' && !(typeof preferencesDirty !== 'undefined' && preferencesDirty)) fillPreferences(data);
   if (name === 'statistics') renderStatistics(data);
   showPage(name);
 }
 for (const name of ['queue', 'settings', 'statistics']) $(`nav-${name}`).addEventListener('click', () => safe(() => navigatePage(name)));
 let preferencesEditVersion = 0;
-for (const event of ['input', 'change']) $('app-settings-form').addEventListener(event, () => { preferencesEditVersion++; });
+for (const event of ['input', 'change']) $('app-settings-form').addEventListener(event, () => {
+  preferencesEditVersion++;
+  preferencesDirty = true;
+  updatePreferencesDraftState();
+});
+$('settings-discard').addEventListener('click', () => safe(async () => {
+  const version = preferencesEditVersion;
+  const data = await api.getAppSettings();
+  if (version === preferencesEditVersion) fillPreferences(data);
+}));
 $('app-settings-form').addEventListener('submit', event => { event.preventDefault(); safe(async () => {
   if ($('settings-save').disabled) return;
   const pageVersion = navigationVersion, editVersion = preferencesEditVersion, originalData = preferencesData;
@@ -110,6 +127,7 @@ $('app-settings-form').addEventListener('submit', event => { event.preventDefaul
   value.outputSuffix = $('pref-outputSuffix').value;
   value.performanceMode = $('pref-performanceMode').value;
   $('settings-save').disabled = true;
+  $('settings-discard').disabled = true;
   try {
     const data = await api.saveAppSettings(value);
     if (pageVersion !== navigationVersion || profileEditing || preferencesData !== originalData) return;
@@ -120,12 +138,12 @@ $('app-settings-form').addEventListener('submit', event => { event.preventDefaul
       $('settings-result').textContent = 'Submitted settings saved. Your newer edits are not saved yet.';
     }
   }
-  finally { $('settings-save').disabled = false; }
+  finally { $('settings-save').disabled = false; $('settings-discard').disabled = false; }
 }); });
 $('settings-pick-output').addEventListener('click', () => safe(chooseOutputFolder));
 $('settings-pick-watch').addEventListener('click', () => safe(async () => {
   const folder = await api.pickWatchFolder();
-  if (folder) { preferencesEditVersion++; preferencesData.preferences.watchFolder = folder; $('settings-watch-folder').textContent = folder; }
+  if (folder) { preferencesEditVersion++; preferencesDirty = true; updatePreferencesDraftState(); preferencesData.preferences.watchFolder = folder; $('settings-watch-folder').textContent = folder; }
 }));
 $('settings-edit-profile').addEventListener('click', () => safe(async () => { if (!savedSettings) throw new Error('Create a playback profile first.'); showPage('queue'); openSetup(); }));
 $('settings-diagnostics').addEventListener('click', () => safe(() => api.exportDiagnostics()));
@@ -147,3 +165,13 @@ $('stats-refresh').addEventListener('click', () => safe(async () => renderStatis
 for (const action of ['export', 'reset']) $(`stats-${action}`).addEventListener('click', () => safe(async () => renderStatistics(await api.statisticsOperation(action))));
 api.onUpdate(update => { if (update.type === 'statistics-changed' && currentPage === 'statistics') safe(async () => renderStatistics(await api.getStatistics())); });
 safe(async () => { const data = await api.getAppSettings(); fillPreferences(data); $('app-version').textContent = `Audiority ${data.version}`; render(); });
+
+// Keep secondary explanations available without burying everyday settings.
+for (const [id, title] of [['settings-watch-folder', 'How watch-folder imports work'], ['theme-presets', 'Choose a color theme']]) {
+  const node = $(id);
+  const content = id === 'theme-presets' ? node : node.parentElement.querySelector('p.meta:last-child');
+  const details = element('details', 'settings-explanation');
+  details.append(element('summary', '', title));
+  content.before(details);
+  details.append(content);
+}

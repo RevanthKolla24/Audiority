@@ -142,7 +142,33 @@ not invalidate the completed output. A verified output path is saved before the
 Trash operation for restart recovery. This may remove your only lossless copy if
 compatibility tracks are disabled; test playback and maintain backups first.
 
-#### Queue pausing
+#### Batch review and queue actions
+
+The queue offers All, Needs conversion, Complete, Failed and Blocked filters.
+Filters only change the view: **Convert queue** still runs all eligible jobs.
+**Retry failed** runs only eligible Error jobs; it does not start Ready or Cancelled
+jobs. **Clear completed** and **Remove selected** remove queue entries only,
+never source or output media. Jobs with pending recovery saves or inaccessible
+outputs must be resolved before targeted removal. Selection lasts for the current
+window session and can include jobs hidden by a filter.
+
+Expand **Destinations & disk space** and refresh to see planned paths, existing-name
+conflicts and conservative storage budgets. Previewing creates no folders or files.
+Numbered alternatives avoid existing names and other jobs in the preview, but are
+not reservations: actual publication still chooses an available name exclusively.
+Refresh after changing the queue, profile, settings or destination. External storage
+changes can also make a preview stale.
+
+Budgets use full source bytes plus estimated newly encoded audio, not an exact
+output-size prediction. Peak space includes retained outputs from earlier jobs,
+one temporary output plus a possible publication copy, and a 64 MiB reserve.
+This can overestimate space when replacing original tracks or using hard links.
+The engine rechecks free space before every job and stops starting further jobs
+after an insufficient-space failure. Free space may change during conversion;
+these checks cannot guarantee completion or account precisely for all filesystem
+overhead and external subtitle copies.
+
+#### Pause and resume
 
 Use **Pause** beside Cancel queue to stop the queue from starting its next job.
 The active conversion, verification, publication and statistics recording finish
@@ -263,13 +289,17 @@ Unconvertible tracks remain original with **unresolved compatibility** warnings 
 
 Open **Edit playback setup → Edit Advanced Audio Rules → Conversion Matrix**.
 
-- **Extract compatible DTS core** is enabled by default. Inspection runs `dca_core` on a short sample of extended DTS audio and probes the result. When the profile allows ordinary DTS, a suitable existing core is copied through that filter without another lossy encode. Output verification checks the actual codec profile, sample rate, channels and layout. No usable core means normal conversion rules apply; extraction never invents a 5.1 core. Supported sources are still preserved when preservation is enabled.
+- **Extract compatible DTS core** is enabled by default. Inspection runs `dca_core` on a short sample of extended DTS audio and probes the result. When the profile allows ordinary DTS, a suitable existing core is copied through that filter without another lossy encode. Output verification checks the actual codec profile, sample rate, channels and layout, compares the complete extracted payload with the source core, and decodes changed audio across its full duration before publication. A requested core with no usable inspection result remains unresolved rather than silently substituting a lossy encode; explicit DTS-core mode blocks that job. Extraction never invents a 5.1 core. Supported sources are still preserved when preservation is enabled in playback mode.
 - **Allow downmixing** is opt-in; the initial rule is `7.1 → 5.1(side)`. Add/edit rules for known 7.1, 6.1 and 5.1 variants to 5.1(side), 3.1 or stereo. An explicit smaller output takes priority over accepting a larger DTS core. Mixing uses FFmpeg's layout-aware resampler with matrix normalization, then an allowed encoder. DTS in the bundled build does not encode 3.1: automatic selection can fall back to AC-3, but an explicit DTS-only conversion remains unresolved. Stereo PCM remains the only PCM target. Unlisted/unknown layouts are unchanged.
 - **Never convert these formats** overrides core extraction, downmixing and per-source conversion rules. DTS and extended DTS have separate selections. Excluding E-AC-3 preserves it at any channel count, even if the receiver profile does not confirm playback; the warning remains visible.
 
 Example for an older receiver: enable core extraction, enable `7.1 → 5.1(side)`, and exclude E-AC-3 only if you want your player to handle it. DTS-HD with a suitable core uses that core; FLAC 7.1 is mixed and encoded to a compatible target; excluded E-AC-3 remains unchanged. Downmixing sacrifices discrete channel positions, and re-encoding removes object metadata. Original input files remain untouched.
 
 Testing includes real 7.1 → 5.1/3.1/stereo conversions, byte-identical excluded E-AC-3 packet checks, and real core-filter output verification. No DTS-HD fixture is included: HD policy decisions are unit-tested, while the filter integration fixture is ordinary DTS.
+
+Genuine DTS-HD acceptance is opt-in and remains **unverified** until suitable input is supplied. `test/genuine-dtshd.test.js` requires both `AUDIORITY_TEST_DTSHD=1` (consent to temporary output creation) and `AUDIORITY_DTSHD_FIXTURE` pointing to a legally usable fixture under 128 MiB and at most 60 seconds. Run it with `node --test test/genuine-dtshd.test.js` and the usual media-tool overrides. It rejects ordinary DTS, requires a genuine MA/HRA 5.1 source and six-channel core, uses automatic inspection/planning, verifies the output and source hash, and removes its temporary outputs. A skipped test is not acceptance evidence. Run MA and HRA fixtures separately on both native platforms. This does not sign off full-movie synchronization, target-player playback, or installed Windows 11 behavior.
+
+Changed-audio integrity verification adds full reads and decoding (without writing another audio file); it does not re-encode the published track. Conversion stage timing and total elapsed time must be measured separately before making performance claims. Chapters and stable global metadata are checked before publication; packet-level relative A/V/subtitle timestamp validation remains a separate acceptance gap.
 
 ### Run locally
 

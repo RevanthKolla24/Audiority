@@ -7,7 +7,6 @@ if (api.platform === 'win32') {
   const localNote = document.querySelector('.sidebar-bottom');
   localNote.textContent = 'On-device processing · No uploads';
   document.querySelector('header .eyebrow').textContent = 'LOCAL MEDIA UTILITY';
-  $('policy-summary-slot').append(document.querySelector('.policy'));
   const importFiles = element('button', '', 'Add files…');
   importFiles.id = 'import-files';
   importFiles.type = 'button';

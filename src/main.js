@@ -19,6 +19,8 @@ const { pathToFileURL } = require('node:url');
 const { Engine } = require('./engine');
 const { audioOutputPreview } = require('./audio-output-map');
 const { nextQueueItem } = require('./queue-priority');
+const { previewBatch } = require('./batch-preflight');
+const { removeQueueItems } = require('./queue-actions');
 const { trashOriginal } = require('./trash-original');
 const { validOutput, outputState } = require('./source-safety');
 const { toolPaths } = require('./tools');
@@ -290,7 +292,7 @@ app.whenReady().then(async () => {
   });
   handle('export-diagnostics', async () => {
     const selection = await dialog.showSaveDialog(window, { defaultPath: 'audiority-diagnostics.json', filters: [{ name: 'JSON', extensions: ['json'] }] });
-    if (!selection.canceled) await fs.writeFile(selection.filePath, JSON.stringify({ version: app.getVersion(), platform: process.platform, arch: process.arch, electron: process.versions.electron, encoders: engine.capabilities, tools: await engine.toolVersions(), limitations: ['MKV only', 'No video/GPU audio encoding', 'Development FFmpeg redistribution blocked', 'Windows validation outstanding'] }, null, 2));
+    if (!selection.canceled) await fs.writeFile(selection.filePath, JSON.stringify({ version: app.getVersion(), platform: process.platform, arch: process.arch, electron: process.versions.electron, encoders: engine.capabilities, tools: await engine.toolVersions(), limitations: ['MKV only', 'No video/GPU audio encoding', 'FFmpeg redistribution obligations require separate review', 'Playback compatibility does not guarantee direct play'] }, null, 2));
   });
   const appearanceState = () => ({ state: appearance, builtins, tokenNames, warning: appearanceWarning });
   handle('get-appearance', appearanceState);
@@ -368,6 +370,19 @@ app.whenReady().then(async () => {
     } finally { appStateBusy = false; send('recovery-busy', { value: false }); }
   });
   handle('cancel', cancelQueue);
+  handle('preview-batch', async () => {
+    if (running || importing || appStateBusy || profileBusy) throw new Error('Wait until the current operation finishes.');
+    const snapshot = JSON.stringify([preferences, outputDirectory, [...items.values()].map(item => [item.id, item.plan, item.status])]);
+    const result = await previewBatch([...items.values()].sort((a, b) => (b.priority || 0) - (a.priority || 0)), outputDirectory, preferences);
+    if (snapshot !== JSON.stringify([preferences, outputDirectory, [...items.values()].map(item => [item.id, item.plan, item.status])])) throw new Error('Queue changed. Refresh the preview.');
+    return result;
+  });
+  handle('queue-operation', async action => {
+    if (running || importing || appStateBusy || profileBusy) throw new Error('Queue is busy.');
+    appStateBusy = true; send('recovery-busy', { value: true });
+    try { return await removeQueueItems(items, action, () => persistQueue(true)); }
+    finally { appStateBusy = false; send('recovery-busy', { value: false }); }
+  });
   handle('pause', () => {
     if (!running || controller?.signal.aborted) return false;
     if (!isQueuePaused) {
@@ -381,7 +396,7 @@ app.whenReady().then(async () => {
   handle('prioritize-item', async id => {
     if (typeof id !== 'string' || !items.has(id)) throw new Error('Unknown queue item.');
     const item = items.get(id);
-    if (item.status !== 'Ready' || item.output || !item.plan?.needsConversion) throw new Error('Only Ready items can be prioritized.');
+    if (!['Ready', 'Error', 'Cancelled'].includes(item.status) || item.output || item.plan?.blocked || !item.plan?.needsConversion) throw new Error('Only runnable items can be prioritized.');
     if (importing || profileBusy || appStateBusy) throw new Error('Wait for import or settings to finish.');
     // Monotonic even for multiple clicks within the same millisecond.
     let priority = Date.now();
@@ -393,7 +408,8 @@ app.whenReady().then(async () => {
     return item.priority;
   });
   handle('reveal', id => { const item = items.get(id); if (item?.output) shell.showItemInFolder(item.output); });
-  handle('start', async () => {
+  handle('start', async (options = {}) => {
+    if (!options || typeof options !== 'object' || Object.keys(options).some(key => key !== 'failedOnly') || options.failedOnly !== undefined && typeof options.failedOnly !== 'boolean') throw new Error('Invalid start options.');
     if (running || profileBusy || appStateBusy) throw new Error('Queue or settings operation is already running.');
     if (importing) throw new Error('Finish import first.');
     if ([...items.values()].some(item => item.outputUnavailable) && !nextQueueItem(items, new Set())) {
@@ -444,7 +460,7 @@ app.whenReady().then(async () => {
     }
     if (!settings) throw new Error('Finish playback setup first.');
     if (!outputDirectory) throw new Error('Choose an output folder first.');
-    const eligible = [...items.values()].filter(item => !item.output && item.plan?.needsConversion && !item.plan.blocked && ['Ready', 'Error', 'Cancelled'].includes(item.status));
+    const eligible = [...items.values()].filter(item => !item.output && item.plan?.needsConversion && !item.plan.blocked && (options.failedOnly ? item.status === 'Error' : ['Ready', 'Error', 'Cancelled'].includes(item.status)));
     if (!eligible.length) throw new Error('No runnable jobs. Review blocked or unresolved track plans before starting.');
     const preflightSnapshot = JSON.stringify([settings, preferences, outputDirectory, eligible.map(item => [item.id, item.plan])]);
     const unresolved = eligible.filter(item => item.plan.unresolved);
@@ -457,7 +473,7 @@ app.whenReady().then(async () => {
       if (running || importing || profileBusy || appStateBusy || queueQuitPending) throw new Error('Queue changed while reviewing. Try again.');
       // Reconfirm if an asynchronous settings/import operation changed the plan.
       if (eligible.some(item => items.get(item.id) !== item || item.plan.blocked)) throw new Error('Queue plan changed. Review it before starting again.');
-      const currentEligible = [...items.values()].filter(item => !item.output && item.plan?.needsConversion && !item.plan.blocked && ['Ready', 'Error', 'Cancelled'].includes(item.status));
+      const currentEligible = [...items.values()].filter(item => !item.output && item.plan?.needsConversion && !item.plan.blocked && (options.failedOnly ? item.status === 'Error' : ['Ready', 'Error', 'Cancelled'].includes(item.status)));
       if (JSON.stringify([settings, preferences, outputDirectory, currentEligible.map(item => [item.id, item.plan])]) !== preflightSnapshot) throw new Error('Queue or settings changed while reviewing. Review the new plan before starting.');
     }
     running = true;
@@ -475,7 +491,7 @@ app.whenReady().then(async () => {
     };
     try {
       if (preferences.preventSleep) sleepBlocker = powerSaveBlocker.start('prevent-app-suspension');
-      const attempted = new Set();
+      const attempted = new Set(options.failedOnly ? [...items.values()].filter(item => !eligible.includes(item)).map(item => item.id) : []);
       while (true) {
         if (controller.signal.aborted) break;
         const item = nextQueueItem(items, attempted);
@@ -525,6 +541,10 @@ app.whenReady().then(async () => {
             const diagnostic = `Audiority ${app.getVersion()} · ${process.platform}/${process.arch}\nStage: ${item.status} · ${item.verificationStage || 'Writing output'}\n${error.message}\nPlan: ${item.plan.tracks.map(track => `${track.index}: ${track.sourceFormat || track.sourceCodec} → ${track.action} ${track.codec}`).join('; ')}`;
             send('status', { id: item.id, status: controller.signal.aborted ? 'Cancelled' : 'Error', error: error.message, diagnostic });
             await record(controller.signal.aborted ? 'cancelled' : 'failed', item, started);
+            if (error.code === 'ENOSPC') {
+              send('queue-warning', { message: 'Queue stopped because destination space is insufficient. Free space or change destination before retrying.' });
+              break;
+            }
           }
         }
       }

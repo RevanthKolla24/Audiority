@@ -19,9 +19,9 @@ module.exports = { verificationProgress };
 // These are phase estimates, never an extrapolated whole-job finish time.
 function verificationPhases(counts, now = Date.now) {
   const trackers = new Map(), states = new Map();
-  const names = { video: 'Video checks', audio: 'Copied audio checks', subtitle: 'Subtitle checks', attachment: 'Font / attachment checks' };
+  const names = { video: 'Video checks', audio: 'Copied audio checks', changedAudio: 'Changed audio integrity', subtitle: 'Subtitle checks', attachment: 'Font / attachment checks' };
   return (key, activity) => {
-    const phase = key.startsWith('Checking video') ? 'video' : key.startsWith('Checking copied audio') || key.startsWith('Checking retained audio') ? 'audio' : key.startsWith('Checking subtitle') ? 'subtitle' : key.startsWith('Checking attachment') ? 'attachment' : null;
+    const phase = key.startsWith('Checking video') ? 'video' : key.startsWith('Checking copied audio') || key.startsWith('Checking retained audio') ? 'audio' : key.startsWith('Checking extracted audio') || key.startsWith('Decoding changed audio') ? 'changedAudio' : key.startsWith('Checking subtitle') ? 'subtitle' : key.startsWith('Checking attachment') ? 'attachment' : null;
     if (!phase) return undefined;
     if (!trackers.has(phase)) trackers.set(phase, verificationProgress(counts[phase] || 0, now));
     const state = trackers.get(phase)(key, activity);

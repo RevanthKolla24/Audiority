@@ -45,7 +45,7 @@ test('packaged resource gate rejects unsupported targets, missing assets and sta
     await fs.writeFile(path.join(source, 'package.json'), JSON.stringify({ version: '0.0.0' }));
     await asar.createPackage(source, path.join(resources, 'app.asar'));
     assert.throws(() => validatePackagedApp('win', dir));
-    for (const file of ['src/main.js', 'src/preload.js', 'src/windows-menu.js', 'src/ui/index.html', 'src/ui/platform.js', 'src/ui/windows-desktop.js', 'src/ui/windows-desktop.css', 'src/assets/logo.png']) {
+    for (const file of ['src/main.js', 'src/preload.js', 'src/windows-menu.js', 'src/batch-preflight.js', 'src/queue-actions.js', 'src/ui/batch.js', 'src/ui/index.html', 'src/ui/platform.js', 'src/ui/windows-desktop.js', 'src/ui/windows-desktop.css', 'src/assets/logo.png']) {
       await fs.mkdir(path.dirname(path.join(source, file)), { recursive: true });
       await fs.writeFile(path.join(source, file), 'fixture');
     }

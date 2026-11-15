@@ -34,6 +34,7 @@ async function chooseOutputFolder() {
   const selected = await api.pickOutput();
   if (selected) output = selected;
   syncOutputFolder(); render();
+  if (typeof invalidateBatchPreview === 'function') invalidateBatchPreview();
 }
 const label = codec => codec === 'dtshd' ? 'DTS-HD' : codec === 'dca' || codec === 'dts' ? 'DTS' : codec === 'ac3' ? 'Dolby Digital' : codec === 'eac3' ? 'Dolby Digital Plus' : codec.startsWith('pcm_') ? 'PCM' : codec.toUpperCase();
 // Element: receives tag, className, text. See the return statements below for the result; async results are Promises.
@@ -100,6 +101,10 @@ function patchProgress(update) {
   updateProgressNode(wrap, item);
 }
 const cardSnapshots = new WeakMap();
+// Match backend eligibility: blocked plans must never advertise runnable work.
+function isRunnable(item) {
+  return !item.output && !item.outputPreview?.blocked && !!item.needsConversion && ['Ready', 'Error', 'Cancelled'].includes(item.status);
+}
 // Create item card: receives item. See the return statements below for the result; async results are Promises.
 function createItemCard(item) {
     const card = element('article', 'item');
@@ -120,6 +125,16 @@ function patchCardState(card, item) {
     const info = element('div'); const name = element('div', 'name', item.name); name.title = item.name; info.append(name);
     if (item.size) info.append(element('div', 'meta', `${(item.size / 1024 ** 3).toFixed(2)} GB · ${remainingText(item.duration)} · ${item.tracks?.length || 0} audio track(s)`));
     head.append(info, element('span', 'status')); body.append(head);
+    if (typeof selectedJobs !== 'undefined') {
+      const selection = element('label', 'check select-job');
+      const checkbox = element('input'); checkbox.type = 'checkbox'; checkbox.checked = selectedJobs.has(item.id);
+      checkbox.setAttribute('aria-label', `Select ${item.name}`);
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked) selectedJobs.add(item.id); else selectedJobs.delete(item.id);
+        updateBatchControls();
+      });
+      selection.append(checkbox, document.createTextNode('Select job')); head.append(selection);
+    }
     if (item.relativeDirectory) body.append(element('p', 'meta', `Output: ${item.relativeDirectory}`));
     if (item.subtitleInfo?.ass) body.append(element('p', 'warning-text', `${item.subtitleInfo.ass} source ASS/SSA track(s) · ${item.subtitleInfo.fonts} embedded font(s). Retained subtitles and attachments are checked before publication; player rendering is not confirmed.`));
     if (item.droppedStreams?.length) body.append(element('p', 'warning-text', `Language filter removes source stream(s): ${item.droppedStreams.join(', ')}. Review language policy before starting.`));
@@ -156,13 +171,13 @@ function patchCardState(card, item) {
   const statusClass = `status ${item.status.toLowerCase().replaceAll(' ', '-')}`;
   if (status.className !== statusClass) status.className = statusClass;
   let prioritize = card.querySelector('.prioritize-item');
-  if (item.status === 'Ready' && !item.output && runnableCount > 1 && firstRunnableId !== item.id) {
+  if (isRunnable(item) && runnableCount > 1 && firstRunnableId !== item.id) {
     if (!prioritize) {
       prioritize = element('button', 'quiet prioritize-item', '↑ Move to Top');
       prioritize.setAttribute('aria-label', `Move ${item.name} to top of queue`);
       prioritize.addEventListener('click', () => safe(async () => {
         prioritize.disabled = true;
-        try { await api.prioritizeItem(item.id); queuePage = 0; render(); }
+        try { await api.prioritizeItem(item.id); queuePage = 0; if (typeof invalidateBatchPreview === 'function') invalidateBatchPreview(); render(); }
         finally { prioritize.disabled = false; }
       }));
     }
@@ -204,11 +219,11 @@ function patchCardState(card, item) {
 }
 // Reads queue state; patches the visible priority-sorted page and controls without wiping all cards.
 function render() {
-  const candidates = [...items.values()].filter(i => !i.output && ['Ready', 'Error', 'Cancelled'].includes(i.status) && (i.needsConversion || i.tracks?.some(t => t.action !== 'copy'))).sort((a, b) => (b.priority || 0) - (a.priority || 0));
+  const candidates = [...items.values()].filter(isRunnable).sort((a, b) => (b.priority || 0) - (a.priority || 0));
   runnableCount = candidates.length; firstRunnableId = candidates[0]?.id || '';
   if (typeof currentPage !== 'undefined' && currentPage !== 'queue') { updateControls(); return; }
   const queue = $('queue');
-  const all = [...items.values()].sort((a, b) => (b.priority || 0) - (a.priority || 0));
+  const all = [...items.values()].filter(item => typeof matchesQueueFilter !== 'function' || matchesQueueFilter(item)).sort((a, b) => (b.priority || 0) - (a.priority || 0));
   queuePage = Math.max(0, Math.min(queuePage, Math.ceil(all.length / queuePageSize) - 1));
   const pageItems = all.slice(queuePage * queuePageSize, (queuePage + 1) * queuePageSize);
   const existing = new Map([...queue.children].filter(node => node.dataset.id).map(node => [node.dataset.id, node]));
@@ -224,8 +239,13 @@ function render() {
     const state = element('div', 'queue-empty');
     const logo = element('img', 'queue-empty-logo');
     logo.src = '../assets/logo.png'; logo.alt = 'Audiority logo';
-    state.append(logo, element('h2', '', 'Your queue is ready'), element('p', '', 'Import files or a folder above to preview your conversion plan.'), element('small', '', 'Local processing · Original files stay untouched unless Auto-Trash is enabled.'));
+    state.append(logo, element('h2', '', items.size ? 'No jobs match this filter' : 'Your queue is ready'), element('p', '', items.size ? 'Choose another queue filter to see your other jobs.' : 'Import files or a folder above to preview your conversion plan.'), element('small', '', 'Local processing · Original files stay untouched unless Auto-Trash is enabled.'));
     queue.append(state);
+  }
+  if (!all.length && empty) {
+    const title = empty.querySelector('h2'), description = empty.querySelector('p');
+    if (title) title.textContent = items.size ? 'No jobs match this filter' : 'Your queue is ready';
+    if (description) description.textContent = items.size ? 'Choose another queue filter to see your other jobs.' : 'Import files or a folder above to preview your conversion plan.';
   }
   for (let i = 0; i < expected.length; i++) if (queue.children[i] !== expected[i]) queue.insertBefore(expected[i], queue.children[i] || null);
   let nav = queue.querySelector('.queue-pagination');
@@ -244,16 +264,18 @@ function render() {
     if (nav.querySelector('.meta').textContent !== text) nav.querySelector('.meta').textContent = text;
     if (queue.lastElementChild !== nav) queue.append(nav);
   } else nav?.remove();
-  $('count').textContent = items.size;
+  $('count').textContent = all.length === items.size ? items.size : `${all.length} / ${items.size}`;
   updateControls();
 }
 // Busy-state controls must stay current even when queue cards are offscreen.
 function updateControls() {
+  if (typeof updateBatchControls === 'function') updateBatchControls();
   const profileOperationPending = typeof managingProfiles !== 'undefined' && managingProfiles;
   const persistencePending = [...items.values()].some(i => i.persistencePending);
   const outputUnavailable = [...items.values()].some(i => i.outputUnavailable);
-  const ready = [...items.values()].some(i => !i.output && ['Ready', 'Error', 'Cancelled'].includes(i.status) && (i.needsConversion || i.tracks?.some(t => t.action !== 'copy')));
-  $('start').textContent = persistencePending ? 'Retry queue save' : outputUnavailable && !ready ? 'Recheck outputs' : !output ? 'Choose output folder first' : 'Convert queue →';
+  const ready = [...items.values()].some(isRunnable);
+  const blocked = [...items.values()].some(i => !i.output && i.outputPreview?.blocked);
+  $('start').textContent = persistencePending ? 'Retry queue save' : outputUnavailable && !ready ? 'Recheck outputs' : !output ? 'Choose output folder first' : !ready && blocked ? 'Resolve blocked plans' : 'Convert queue →';
   $('start').disabled = recoveryBusy || running || importing || profileOperationPending || (!outputUnavailable && !persistencePending && (!output || !ready));
   $('cancel').disabled = !running;
   $('pause').hidden = !running;
@@ -285,7 +307,7 @@ $('drop').addEventListener('dragover', () => $('drop').classList.add('drag'));
 $('drop').addEventListener('dragleave', () => $('drop').classList.remove('drag'));
 $('drop').addEventListener('drop', event => { $('drop').classList.remove('drag'); importFiles(() => api.addFiles(Array.from(event.dataTransfer.files))); });
 $('folder').addEventListener('click', () => safe(chooseOutputFolder));
-$('clear').addEventListener('click', () => safe(async () => { await api.clear(); items.clear(); render(); }));
+$('clear').addEventListener('click', () => safe(async () => { await api.clear(); items.clear(); if (typeof invalidateBatchPreview === 'function') invalidateBatchPreview(); render(); }));
 $('start').addEventListener('click', () => safe(() => api.start()));
 $('cancel').addEventListener('click', () => safe(() => api.cancel()));
 $('pause').addEventListener('click', () => safe(async () => {
@@ -301,6 +323,7 @@ api.onUpdate(update => {
   if (update.type === 'status' && items.has(update.id)) Object.assign(items.get(update.id), update);
   if (update.type === 'status' && ['Converting', 'Verifying', 'Publishing'].includes(update.status)) {
     patchProgress(update);
+    if (typeof queueFilter !== 'undefined' && queueFilter !== 'all') scheduleRender();
     return;
   }
   if (update.type === 'running') { running = update.value; if (!running) queuePaused = false; }

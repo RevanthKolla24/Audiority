@@ -33,7 +33,7 @@ test('stream publication removes owned partial output on cancellation or write f
           };
         }
       };
-      await assert.rejects(publishOutput(temp, directory, base, { io, signal: controller.signal }), cancel ? /abort/i : /ENOSPC/);
+      await assert.rejects(publishOutput(temp, directory, base, { io, signal: controller.signal }), cancel ? /abort/i : { code: 'ENOSPC' });
       assert.ok(writes > 0);
       assert.equal(await fs.readFile(path.join(directory, `${base}.mkv`), 'utf8'), 'existing');
       await assert.rejects(fs.access(path.join(directory, `${base} (1).mkv`)), { code: 'ENOENT' });
@@ -86,7 +86,8 @@ test('publication surfaces copy errors, rejects low space, respects cancellation
     unlink: async () => assert.fail('No blind cleanup of final path')
   };
   await assert.rejects(publishOutput('/temp', '/output', 'episode', { io }), /EFBIG/);
-  await assert.rejects(publishOutput('/temp', '/output', 'episode', { io: { ...io, statfs: async () => ({ bavail: 0, bsize: 1 }) } }), /Insufficient free space/);
+  await assert.rejects(publishOutput('/temp', '/output', 'episode', { io: { ...io, statfs: async () => ({ bavail: 0, bsize: 1 }) } }), { code: 'ENOSPC' });
+  await assert.rejects(publishOutput('/temp', '/output', 'episode', { io: { ...io, link: async () => { throw failure('ENOSPC'); } } }), { code: 'ENOSPC' });
   await assert.rejects(publishOutput('/temp', '/output', 'episode', { io: { ...io, link: async () => { throw failure('EIO'); } } }), /Cannot publish output: EIO/);
   await assert.rejects(publishOutput('/temp', '/output', 'episode', { io, signal: { aborted: true } }), /Cancelled/);
 });

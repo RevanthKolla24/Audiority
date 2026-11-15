@@ -102,7 +102,7 @@ for (const transition of ['none', 'edit', 'navigate', 'reload']) {
     };
     let resolve, pending, calls = 0;
     const context = vm.createContext({ $, navigationVersion: 0, profileEditing: false,
-      preferencesData: { preferences: {} }, preferenceBooleans: [],
+      preferencesData: { preferences: {} }, preferenceBooleans: [], preferencesDirty: false, updatePreferencesDraftState() {},
       api: { saveAppSettings() { calls++; return new Promise(done => { resolve = done; }); } },
       safe: action => { pending = action(); return pending; }, fillPreferences: data => filled.push(data) });
     const source = read('src/ui/pages.js');
@@ -136,6 +136,7 @@ test('offscreen queue renders refresh busy controls without touching queue cards
   const context = vm.createContext({ $, currentPage: 'settings', items: new Map(), running: true, importing: false,
     recoveryBusy: false, queuePaused: false, pauseRequestPending: false, output: '/out', runnableCount: 0, firstRunnableId: '' });
   const source = read('src/ui/renderer.js');
+  vm.runInContext(source.slice(source.indexOf('function isRunnable('), source.indexOf('// Create item card:')), context);
   vm.runInContext(source.slice(source.indexOf('function render()'), source.indexOf('// Safe:')), context);
   vm.runInContext('render()', context);
   for (const id of ['import-folder', 'clear', 'folder', 'settings-pick-output', 'change-setup']) assert.equal($(id).disabled, true);

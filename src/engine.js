@@ -17,7 +17,7 @@ const os = require('node:os');
 const { resolveOutputDirectory } = require('./imports');
 const { validatePreferences, preferencesDefaults } = require('./app-state');
 const { sourceIdentity, sameSource } = require('./source-safety');
-const { estimatedAudioBytes } = require('./conversion-estimates');
+const { checkSpace } = require('./batch-preflight');
 const { createResourceBudget } = require('./resource-budget');
 const { verificationWorkers } = require('./verification-workers');
 const { audioFingerprints } = require('./audio-fingerprints');
@@ -39,12 +39,12 @@ async function publishOutput(temp, directory, basename, { io = fs, signal, suffi
       try { await io.link(temp, destination); return { destination, copied: false }; }
       catch (error) {
         if (error.code === 'EEXIST') continue;
-        if (!['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'EXDEV', 'EINVAL', 'ENOSYS'].includes(error.code)) throw new Error(`Cannot publish output: ${error.message}`, { cause: error });
+        if (!['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'EXDEV', 'EINVAL', 'ENOSYS'].includes(error.code)) throw Object.assign(new Error(`Cannot publish output: ${error.message}`, { cause: error }), { code: error.code });
         copyOnly = true;
       }
       const size = (await io.stat(temp)).size;
       const space = await io.statfs(directory);
-      if (space.bavail * space.bsize < size + 64 * 1024 * 1024) throw new Error('Insufficient free space for exclusive-copy publication; this filesystem requires a second full output copy.');
+      if (space.bavail * space.bsize < size + 64 * 1024 * 1024) throw Object.assign(new Error('Insufficient free space for exclusive-copy publication; this filesystem requires a second full output copy.'), { code: 'ENOSPC' });
     }
     let handle, owned;
     try {
@@ -62,10 +62,10 @@ async function publishOutput(temp, directory, basename, { io = fs, signal, suffi
           // Do not delete a replacement file or symlink installed by another process.
           if (owned && current.isFile() && current.dev === owned.dev && current.ino === owned.ino) await io.unlink(destination);
         } catch (cleanupError) {
-          if (cleanupError.code !== 'ENOENT') throw new Error(`Copy failed: ${error.message}. Could not remove incomplete output ${destination}: ${cleanupError.message}`, { cause: error });
+          if (cleanupError.code !== 'ENOENT') throw Object.assign(new Error(`Copy failed: ${error.message}. Could not remove incomplete output ${destination}: ${cleanupError.message}`, { cause: error }), { code: error.code });
         }
       }
-      throw new Error(`Cannot copy verified output without overwriting: ${error.message}`, { cause: error });
+      throw Object.assign(new Error(`Cannot copy verified output without overwriting: ${error.message}`, { cause: error }), { code: error.code });
     } finally {
       await handle?.close().catch(() => {});
     }
@@ -131,18 +131,21 @@ async function hashProbe(binary, args, signal, onActivity = () => {}) {
 }
 
 // Accepts an executable and argument array; returns a Promise for output or rejects on tool failure/cancellation.
-function run(binary, args, { signal, onLine, idleTimeoutMs = 0, maxOutputBytes = 32 * 1024 * 1024, maxLineBytes = 1024 * 1024 } = {}) {
+function run(binary, args, { signal, onLine, onProgressLine, progressTimeoutMs = 0, idleTimeoutMs = 0, maxOutputBytes = 32 * 1024 * 1024, maxLineBytes = 1024 * 1024 } = {}) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(new Error('Cancelled'));
     if (![maxOutputBytes, maxLineBytes].every(value => Number.isSafeInteger(value) && value > 0)) return reject(new Error('Invalid tool output limit.'));
+    if (!Number.isSafeInteger(progressTimeoutMs) || progressTimeoutMs < 0 ||
+        (onProgressLine !== undefined && typeof onProgressLine !== 'function') ||
+        (progressTimeoutMs > 0 && typeof onProgressLine !== 'function')) return reject(new Error('Invalid progress watchdog configuration.'));
     // spawn starts a separate OS process. An argument array avoids shell parsing of filenames.
     // Pipes let us read progress/errors; ignored stdin prevents the tool waiting for keyboard input.
-    const child = spawn(binary, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '', stderr = '', pending = '';
+    const child = spawn(binary, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe', ...(onProgressLine ? ['pipe'] : [])] });
+    let stdout = '', stderr = '', pending = '', progressPending = '';
     // Incremental UTF-8 decoding preserves metadata characters split across chunks.
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
-    let idleTimer, killTimer, timedOut = false, closed = false, callbackError, outputBytes = 0;
+    let idleTimer, progressTimer, killTimer, timedOut = false, progressStalled = false, closed = false, callbackError, spawnError, outputBytes = 0;
     const terminate = () => {
       if (closed) return;
       child.kill();
@@ -161,7 +164,21 @@ function run(binary, args, { signal, onLine, idleTimeoutMs = 0, maxOutputBytes =
       clearTimeout(idleTimer);
       idleTimer = setTimeout(() => { timedOut = true; terminate(); }, idleTimeoutMs);
     };
+    const progressActivity = () => {
+      if (!progressTimeoutMs) return;
+      clearTimeout(progressTimer);
+      progressTimer = setTimeout(() => { progressStalled = true; terminate(); }, progressTimeoutMs);
+    };
+    const deliverProgress = line => {
+      if (callbackError || progressStalled || signal?.aborted) return;
+      if (Buffer.byteLength(line) > maxLineBytes) { fail(new Error(`Tool progress line exceeded ${maxLineBytes} bytes.`)); return; }
+      try {
+        // The caller acknowledges advancing work, not just a repeated heartbeat.
+        if (onProgressLine(line) === true) progressActivity();
+      } catch (error) { fail(error); }
+    };
     activity();
+    progressActivity();
     const abort = terminate;
     signal?.addEventListener('abort', abort, { once: true });
     child.stdout.on('data', chunk => {
@@ -180,17 +197,44 @@ function run(binary, args, { signal, onLine, idleTimeoutMs = 0, maxOutputBytes =
       }
     });
     child.stderr.on('data', chunk => { activity(); stderr = (stderr + chunk).slice(-24000); });
-    child.on('error', error => { clearTimeout(idleTimer); clearTimeout(killTimer); signal?.removeEventListener('abort', abort); reject(error); });
+    if (onProgressLine) {
+      child.stdio[3].setEncoding('utf8');
+      child.stdio[3].on('data', chunk => {
+        if (callbackError || progressStalled || signal?.aborted) return;
+        progressPending += chunk;
+        const lines = progressPending.split(/\r?\n/); progressPending = lines.pop();
+        for (const line of lines) deliverProgress(line);
+        if (Buffer.byteLength(progressPending) > maxLineBytes) { progressPending = ''; fail(new Error(`Tool progress line exceeded ${maxLineBytes} bytes.`)); }
+      });
+      child.stdio[3].on('error', fail);
+    }
+    // Even spawn failures settle on close, so callers never clean up while a
+    // successfully started process or one of its pipes is still alive.
+    child.on('error', error => { spawnError = error; terminate(); });
     child.on('close', code => {
       closed = true;
       clearTimeout(idleTimer);
+      clearTimeout(progressTimer);
       clearTimeout(killTimer);
       signal?.removeEventListener('abort', abort);
       if (signal?.aborted) reject(new Error('Cancelled'));
+      else if (spawnError) reject(spawnError);
       else if (callbackError) reject(callbackError);
+      else if (progressStalled) reject(new Error(`Verification stalled: no advancing tool progress for ${progressTimeoutMs / 1000} seconds. Check that the media drive is connected and readable.${stderr.trim() ? ` ${stderr.trim()}` : ''}`));
       else if (timedOut) reject(new Error(`Verification stalled: no tool activity for ${idleTimeoutMs / 1000} seconds. Check that the media drive is connected and readable.${stderr.trim() ? ` ${stderr.trim()}` : ''}`));
-      else if (code !== 0) reject(new Error(`Tool ${path.basename(binary)} exited with ${code}. ${stderr.trim() || 'No diagnostic output.'}`));
-       else { if (onLine && pending) deliver(pending); if (callbackError) reject(callbackError); else resolve({ stdout, stderr }); }
+      else if (code !== 0) {
+        const error = new Error(`Tool ${path.basename(binary)} exited with ${code}. ${stderr.trim() || 'No diagnostic output.'}`);
+        // FFmpeg reports filesystem errors through stderr rather than the child exit code.
+        // Only classify explicit disk-full diagnostics; do not guess from other I/O failures.
+        if (/\bNo space left on device\b|\bThere is not enough space on the disk\b|\bDisk full\b/i.test(stderr)) error.code = 'ENOSPC';
+        reject(error);
+      }
+       else {
+         if (onLine && pending) deliver(pending);
+         if (onProgressLine && progressPending) deliverProgress(progressPending);
+         clearTimeout(progressTimer);
+         if (callbackError) reject(callbackError); else resolve({ stdout, stderr });
+       }
     });
   });
 }
@@ -399,6 +443,59 @@ class Engine {
     } else { before = await scan(item.file, true); after = await scan(outputFile, false); }
     if (before.some((entry, i) => entry.count !== after[i].count || entry.hash !== after[i].hash)) throw new Error('Verification failed: copied or retained original audio changed.');
   }
+  // Hash complete extracted bitstreams, not just their initial probe properties.
+  // The hash muxer streams packet payloads without writing another media copy.
+  async verifyChangedAudio(item, outputFile, signal, onVerification = () => {}) {
+    const entries = audioOutputMap(item).filter(entry => entry.track.action !== 'copy' &&
+      (!entry.track.keepOriginal || entry.compatibility));
+    if (!entries.length) return;
+    for (const entry of entries.filter(entry => entry.track.action === 'extract')) {
+      const digest = async (file, selector, extract) => {
+        let lastTime;
+        const result = await run(this.tools.ffmpeg, ['-v', 'error', '-nostdin', '-xerror', '-i', file,
+          '-map', selector, '-c:a', 'copy', ...(extract ? ['-bsf:a', 'dca_core'] : []),
+          '-progress', 'pipe:3', '-stats_period', '1', '-nostats',
+          '-f', 'hash', '-hash', 'sha256', 'pipe:1'], {
+          signal, progressTimeoutMs: 300000, onProgressLine: line => {
+            if (!/^out_time_us=-?\d+$/.test(line)) return false;
+            const time = Number(line.slice(12));
+            if (!Number.isSafeInteger(time) || (lastTime !== undefined && time <= lastTime)) return false;
+            lastTime = time;
+            return true;
+          }
+        });
+        const hash = result.stdout.trim();
+        if (result.stderr.trim() || !/^SHA256=[a-f0-9]{64}$/i.test(hash) ||
+            hash.toLowerCase() === `sha256=${crypto.createHash('sha256').digest('hex')}`) {
+          throw new Error('Verification failed: DTS core could not be completely fingerprinted.');
+        }
+        return hash;
+      };
+      const sourceLabel = `Checking extracted audio ${entry.ordinal + 1}: source core`;
+      const outputLabel = `Checking extracted audio ${entry.ordinal + 1}: output`;
+      onVerification(sourceLabel);
+      const before = await digest(item.file, `0:${entry.source.index}`, true);
+      onVerification(sourceLabel, { done: true });
+      onVerification(outputLabel);
+      const after = await digest(outputFile, `0:a:${entry.ordinal}`, false);
+      if (before !== after) throw new Error('Verification failed: extracted DTS core payload differs from source core.');
+      onVerification(outputLabel, { done: true });
+    }
+    onVerification('Decoding changed audio across full duration…');
+    const result = await run(this.tools.ffmpeg, ['-v', 'error', '-nostdin', '-xerror', '-err_detect', 'explode',
+      '-i', outputFile, ...entries.flatMap(entry => ['-map', `0:a:${entry.ordinal}`]),
+      '-progress', 'pipe:1', '-nostats', '-f', 'null', '-'], {
+      signal, idleTimeoutMs: 120000, onLine: line => {
+        if (line.startsWith('out_time_us=')) {
+          const elapsed = Number(line.slice(12)) / 1e6;
+          onVerification('Decoding changed audio across full duration…',
+            item.duration > 0 && Number.isFinite(elapsed) ? { fraction: elapsed / item.duration } : undefined);
+        }
+      }
+    });
+    if (result.stderr.trim()) throw new Error(`Verification failed: changed audio decode reported errors. ${result.stderr.trim()}`);
+    onVerification('Decoding changed audio across full duration…', { done: true });
+  }
   // Accepts a planned job, folder and callbacks; returns verified output paths, warnings and size after publication.
   async convert(item, directory, { signal, onProgress = () => {}, onVerification = () => {}, onStage = () => {}, onTemporaryOutput = async () => {}, onPublished = async () => {}, preferences = preferencesDefaults() } = {}) {
     const started = performance.now(), timings = {};
@@ -419,9 +516,7 @@ class Engine {
     if (!directoryStat.isDirectory()) throw new Error('Output destination is not a folder.');
     await fs.access(directory, require('node:fs').constants.W_OK);
     const duration = item.duration;
-    const audioBytes = estimatedAudioBytes(item);
-    const space = await fs.statfs(directory);
-    if (space.bavail * space.bsize < item.size + audioBytes + 64 * 1024 * 1024) throw new Error('Insufficient free space for a safe conversion.');
+    await checkSpace(directory, item);
     const basename = `${path.parse(item.name).name}${preferences.outputSuffix}`;
     const temp = path.join(directory, `.${basename}.${crypto.randomUUID()}.partial.mkv`);
     let publicationCleanupAttempted = false;
@@ -498,6 +593,8 @@ class Engine {
       const trackVerification = require('./verification-progress').verificationPhases({
         video: retained.filter(stream => stream.codec_type === 'video').length * 2,
         audio: item.plan.tracks.some(track => track.action === 'copy' || track.keepOriginal) ? 2 : 0,
+        changedAudio: item.plan.tracks.filter(track => track.action === 'extract').length * 2 +
+          Number(item.plan.tracks.some(track => track.action !== 'copy')),
         subtitle: retained.filter(stream => stream.codec_type === 'subtitle').length * 2,
         attachment: retained.filter(stream => stream.codec_type === 'attachment').length * 2
       });
@@ -510,7 +607,10 @@ class Engine {
         return probe;
       });
       await measure('video', () => this.verifyVideo(item, temp, signal, onVerification));
-      await measure('audio', () => this.verifyCopiedAudio(item, temp, signal, onVerification, budget, output));
+      await measure('audio', async () => {
+        await this.verifyCopiedAudio(item, temp, signal, onVerification, budget, output);
+        await this.verifyChangedAudio(item, temp, signal, onVerification);
+      });
       await measure('subtitlesAndAttachments', () => this.verifySubtitles(item, temp, signal, onVerification, budget));
       const conversionReport = require('./conversion-report').conversionReport(item, output, preferences, this.profile);
       if (!sameSource(sourceSnapshot, await sourceIdentity(item.file))) throw new Error('Source changed during processing. Output was not published; re-import the source.');
@@ -565,6 +665,7 @@ class Engine {
 
 // Accepts source job and output probe data; throws if stream counts, audio properties or duration disagree.
 function verifyOutput(item, output) {
+  verifyContainerMetadata(item.probe, output);
   const sourceStreams = item.probe.streams.filter(s => !(item.plan.droppedStreams || []).includes(s.index));
   const added = item.plan.tracks.filter(t => t.keepOriginal && t.action !== 'copy').length;
   if (output.streams.length !== sourceStreams.length + added) throw new Error('Verification failed: stream count changed.');
@@ -601,6 +702,63 @@ function verifyOutput(item, output) {
   }
   const outputDuration = Number(output.format?.duration);
   if (item.duration && (!Number.isFinite(outputDuration) || Math.abs(outputDuration - item.duration) > Math.max(1, item.duration * 0.001))) throw new Error('Verification failed: output duration differs from input.');
+}
+
+// Muxer-written encoder/duration tags are not user metadata. Preserve all other
+// source global/chapter tags case-insensitively; Matroska normalizes tag spelling.
+function verifyContainerMetadata(source, output) {
+  // FFmpeg's ff_mkv_metadata_conv maps only these generic/native aliases.
+  const aliases = { lead_performer: 'performer', part_number: 'track' };
+  const creationTime = value => {
+    // Explicit timezone and calendar validation avoid Date.parse silently fixing
+    // invalid dates or interpreting timezone-less values in the host timezone.
+    const match = typeof value === 'string' && value.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:?\d{2})$/i);
+    if (!match) return value;
+    const [, year, month, day, hour, minute, second, fraction = '', zone] = match;
+    const date = new Date(`${year}-${month}-${day}T${hour}:${minute}:${second}.000Z`);
+    if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 19) !== `${year}-${month}-${day}T${hour}:${minute}:${second}`) return value;
+    let offset = 0;
+    if (zone.toUpperCase() !== 'Z') {
+      const parts = zone.slice(1).replace(':', '');
+      const hours = Number(parts.slice(0, 2)), minutes = Number(parts.slice(2));
+      if (hours > 23 || minutes > 59) return value;
+      offset = (hours * 60 + minutes) * 60000 * (zone[0] === '+' ? 1 : -1);
+    }
+    // FFmpeg timestamps have microsecond precision. Truncate excess fractional
+    // digits explicitly, without discarding meaningful sub-millisecond changes.
+    return BigInt(date.getTime() - offset) * 1000n + BigInt(fraction.padEnd(6, '0').slice(0, 6));
+  };
+  const tags = value => {
+    const normalized = new Map();
+    for (const [key, raw] of Object.entries(value || {})) {
+      const lower = key.toLowerCase(), canonical = Object.hasOwn(aliases, lower) ? aliases[lower] : lower;
+      const entry = canonical === 'creation_time' ? creationTime(raw) : raw;
+      if (normalized.has(canonical) && normalized.get(canonical) !== entry) {
+        throw new Error(`Verification failed: conflicting metadata aliases (${canonical}).`);
+      }
+      normalized.set(canonical, entry);
+    }
+    return normalized;
+  };
+  const checkTags = (before, after) => {
+    const actual = tags(after);
+    for (const [key, value] of tags(before)) {
+      if (['encoder', 'duration', 'major_brand', 'minor_version', 'compatible_brands'].includes(key)) continue;
+      if (!actual.has(key) || actual.get(key) !== value) throw new Error(`Verification failed: container/chapter metadata changed (${key}).`);
+    }
+  };
+  checkTags(source.format?.tags, output.format?.tags);
+  const before = source.chapters || [], after = output.chapters || [];
+  if (before.length !== after.length) throw new Error('Verification failed: chapter count changed.');
+  before.forEach((chapter, index) => {
+    for (const key of ['start_time', 'end_time']) {
+      const expected = Number(chapter[key]), actual = Number(after[index][key]);
+      if (!Number.isFinite(expected) || !Number.isFinite(actual) || Math.abs(expected - actual) > 0.002) {
+        throw new Error('Verification failed: chapter timing changed.');
+      }
+    }
+    checkTags(chapter.tags, after[index].tags);
+  });
 }
 
 module.exports = { Engine, run, parseCapabilities, verifyOutput, hashFile, hashProbe, publishOutput, publishSidecar };
